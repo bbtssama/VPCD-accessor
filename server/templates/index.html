@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>电脑网盘</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="static/bootstrap.min.css">
+<link rel="stylesheet" href="static/highlight.min.css">
+<style>
+  /* 品牌蓝：直接覆盖 Bootstrap primary 变量，让按钮/高亮整体统一 */
+  :root {
+    --bs-primary: #2563eb;
+    --bs-primary-rgb: 37, 99, 235;
+  }
+  body {
+    font-size: 14px; line-height: 1.6; background: #f3f4f6;
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    padding-top: 58px; /* 固定顶栏高度 */
+  }
+  .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--bs-primary);
+          color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 15px; }
+  /* 磁盘胶囊标签 / 面包屑：横向滚动，隐藏滚动条 */
+  #driveTabs, #breadcrumb { scrollbar-width: none; }
+  #driveTabs::-webkit-scrollbar, #breadcrumb::-webkit-scrollbar { display: none; }
+  #driveTabs .btn { white-space: nowrap; }
+  /* 面包屑分段 */
+  #breadcrumb .seg { padding: 3px 8px; border-radius: 6px; cursor: pointer; color: var(--bs-secondary-color); white-space: nowrap; }
+  #breadcrumb .seg:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+  #breadcrumb .sep { color: var(--bs-border-color); margin: 0 1px; }
+  #breadcrumb .cur { color: var(--bs-body-color); font-weight: 600; padding: 3px 8px; white-space: nowrap; }
+  /* 文件名（flex 子项需要 min-width:0 才能正确截断） */
+  .nm { min-width: 0; }
+  /* 顶部轻量 toast（固定定位，避开 Bootstrap 自带 .toast 组件） */
+  .app-toast { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 1080;
+               background: rgba(17,24,39,.92); color: #fff; border-radius: 8px; padding: 9px 16px;
+               font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+  .app-toast.show { opacity: 1; }
+  .empty { text-align: center; color: var(--bs-secondary-color); padding: 40px 0; }
+  /* 置顶列表行分隔 */
+  .prow + .prow { border-top: 1px dashed var(--bs-border-color); }
+  /* 星标 */
+  .star { color: #d1d5db; font-size: 16px; }
+  .star.on { color: #d97706; }
+  /* 详情表 */
+  .detail-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .detail-tbl td { padding: 6px 8px; border-bottom: 1px solid var(--bs-border-color); vertical-align: top; word-break: break-all; }
+  .detail-tbl td.k { color: var(--bs-secondary-color); width: 84px; white-space: nowrap; }
+  .detail-sec { margin-top: 14px; padding-bottom: 6px; border-bottom: 1px solid var(--bs-border-color);
+                font-size: 13px; font-weight: 600; color: var(--bs-secondary-color); }
+  /* Markdown 渲染 */
+  .md-h { margin: 12px 0 6px; }
+  .md-p { margin: 6px 0; }
+  .md-code { background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color); border-radius: 8px;
+             padding: 10px; overflow: auto; font-size: 12px; line-height: 1.6; margin: 8px 0; }
+  .md-quote { border-left: 3px solid var(--bs-primary); color: var(--bs-secondary-color); padding: 4px 10px;
+              margin: 8px 0; background: var(--bs-primary-bg-subtle); border-radius: 0 6px 6px 0; }
+  .md-hr { border: none; border-top: 1px solid var(--bs-border-color); margin: 12px 0; }
+  .md-table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+  .md-table th, .md-table td { border: 1px solid var(--bs-border-color); padding: 5px 8px; text-align: left; }
+  .md-table th { background: var(--bs-tertiary-bg); }
+  .md-ul, .md-ol { margin: 6px 0 6px 22px; }
+  /* 文本预览 */
+  .text-pre { white-space: pre-wrap; font-family: ui-monospace, Consolas, "Courier New", monospace; font-size: 13px;
+              line-height: 1.7; background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color);
+              border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; }
+  /* 预览加载态（可取消）：转圈 + 提示 + 取消按钮 */
+  .ld-box { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  /* 大文本分片渲染进度提示 */
+  .render-tip { color: var(--bs-secondary-color); font-size: 12px; margin: 6px 0; }
+  /* 截断提示行（超大文件仅预览前 400KB 时的分割线 + 说明 + 下载全文按钮） */
+  .bigfile-note { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; padding-top: 10px;
+                  border-top: 1px solid var(--bs-border-color); color: var(--bs-secondary-color); font-size: 13px; }
+  /* 解压列表 */
+  .unpack-list { max-height: 50vh; overflow: auto; border: 1px solid var(--bs-border-color); border-radius: 8px; }
+  .unpack-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--bs-border-color); }
+  .unpack-row:last-child { border-bottom: none; }
+  .unpack-row:not(.dir) { cursor: pointer; }
+  .unpack-row:not(.dir):hover { background: var(--bs-tertiary-bg); }
+  .unpack-row .uname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+  .unpack-row .usz { color: var(--bs-secondary-color); font-size: 12px; flex-shrink: 0; }
+  /* 视频容器 */
+  .video-wrap { position: relative; width: 100%; max-height: 60vh; background: #000; border-radius: 8px; overflow: hidden; }
+  .video-wrap video { width: 100%; max-height: 60vh; background: #000; display: block; }
+  .video-err { display: none; color: var(--bs-danger); font-size: 13px; margin-top: 8px; line-height: 1.8; white-space: pre-wrap; }
+  /* 转码等待提示（原生模式转码档 409 轮询期间显示） */
+  .video-tip { display: none; text-align: center; color: var(--bs-secondary-color); font-size: 13px; padding: 6px 0; }
+  /* 进度条预览浮层（缩略图条 / 单帧） */
+  .video-preview { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 5;
+                   background: #000; border: 1px solid rgba(255,255,255,.4); border-radius: 6px;
+                   overflow: hidden; pointer-events: none; }
+  .video-preview img { display: block; height: 90px; }
+  /* 字幕覆盖层（MSE 模式用自定义 overlay 显示字幕） */
+  .video-sub { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; z-index: 4;
+               color: #fff; font-size: 15px; line-height: 1.5; text-shadow: 0 1px 3px #000;
+               padding: 0 12px; pointer-events: none; white-space: pre-wrap; word-break: break-all; }
+  /* 视频详情面板（标题/作者/类型/统计/标签/备注；识别到才展示） */
+  .video-meta { padding-bottom: 2px; }
+  .vtitle { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+            overflow: hidden; word-break: break-all; }
+  .vavatar { width: 28px; height: 28px; font-size: 13px; flex-shrink: 0; user-select: none; }
+  .vname { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vtag { font-size: 12px; padding: .35em .7em; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
+  .vtag:hover { background: var(--bs-secondary-bg); border-color: var(--bs-secondary-border-subtle); }
+  .vtech { font-size: 11px; padding: .3em .6em; color: var(--bs-secondary-color);
+           max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vnotes { line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+  .vnotes-fold { max-height: 4.8em; overflow: hidden; }
+  .vtoggle { text-decoration: none; user-select: none; }
+  /* 网格视图（大图标，类似 Windows 文件管理器） */
+  #fileRows.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; padding: 8px; }
+  .grid-item { display: flex; flex-direction: column; align-items: center; padding: 10px 6px 8px; cursor: pointer; text-align: center; }
+  .grid-item:hover { background: var(--bs-tertiary-bg); }
+  .grid-top { width: 100%; display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-bottom: 2px; }
+  .grid-star { color: #d1d5db; font-size: 14px; cursor: pointer; user-select: none; }
+  .grid-star.on { color: #d97706; }
+  .grid-info { font-size: 14px; cursor: pointer; padding: 0 2px; }
+  .grid-cover-wrap { width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
+  .grid-cover { max-width: 88px; max-height: 88px; object-fit: contain; }
+  .grid-name { width: 100%; font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all; margin-top: 6px; }
+  .grid-size { color: var(--bs-secondary-color); font-size: 11px; margin-top: 2px; }
+  /* 手机端触控目标放大（≥40px） */
+  @media (max-width: 575.98px) {
+    .btn-sm { padding: .4rem .7rem; font-size: .875rem; border-radius: .4rem; }
+    .list-group-item { min-height: 44px; }
+    .vtitle { font-size: 1.05rem; }
+  }
+</style>
+</head>
+<body class="bg-body-tertiary">
+
+<!-- 固定顶栏（navbar）：品牌 + 上传 -->
+<nav class="navbar fixed-top bg-white border-bottom shadow-sm py-1">
+  <div class="container-fluid px-2">
+    <span class="navbar-brand d-flex align-items-center gap-2 mb-0 fs-6">
+      <span class="logo">☁</span> 电脑网盘
+    </span>
+    <div class="d-flex gap-2 align-items-center">
+      <button id="uploadBtn" class="btn btn-outline-primary btn-sm">
+        <span class="d-none d-sm-inline">⬆ 上传到当前目录</span>
+        <span class="d-inline d-sm-none">⬆ 上传</span>
+      </button>
+      <input type="file" id="fileInput" multiple hidden>
+    </div>
+  </div>
+</nav>
+
+<main class="container-fluid px-2 py-2" style="max-width:1200px">
+  <!-- 磁盘标签：一行横向可滚动胶囊按钮，手机上手指左右滑 -->
+  <div id="driveTabs" class="d-flex overflow-x-auto gap-1 py-1 mb-2"></div>
+
+  <!-- 置顶文件卡片 -->
+  <div id="pinnedCard" class="card shadow-sm mb-2">
+    <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
+      <span class="fs-6 fw-semibold flex-shrink-0">⭐ 置顶文件</span>
+      <div class="d-flex align-items-center gap-2">
+        <button id="packBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
+          <span class="d-none d-sm-inline">📦 打包 .rar 下载</span>
+          <span class="d-inline d-sm-none">📦 打包</span>
+        </button>
+        <button id="shareAllBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
+          <span class="d-none d-sm-inline">🔗 全部分享</span>
+          <span class="d-inline d-sm-none">🔗 分享</span>
+        </button>
+        <span id="pinCount" class="badge text-bg-secondary rounded-pill flex-shrink-0"></span>
+      </div>
+    </div>
+    <div class="card-body py-2" id="pinnedList"></div>
+  </div>
+
+  <!-- 工具栏：导航（后退/前进）+ 面包屑（横向滚动）+ 刷新/视图切换 -->
+  <div class="d-flex align-items-center gap-2 mb-2">
+    <button id="navBack" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="后退" disabled>←</button>
+    <button id="navFwd" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="前进" disabled>→</button>
+    <div id="breadcrumb" class="d-flex align-items-center overflow-x-auto text-nowrap flex-grow-1 py-1"></div>
+    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0">↻ 刷新</button>
+    <button id="viewBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="切换视图">▦</button>
+  </div>
+
+  <div id="alert" class="alert alert-danger py-2 mb-2 d-none"></div>
+
+  <!-- 上传进度条 -->
+  <div class="progress d-none mb-2" style="height:4px" role="progressbar" aria-label="上传进度">
+    <div id="upBar" class="progress-bar" style="width:0%"></div>
+  </div>
+
+  <!-- 文件列表（list-group） -->
+  <div class="card shadow-sm">
+    <ul id="fileRows" class="list-group list-group-flush"></ul>
+  </div>
+</main>
+
+<!-- 轻量 toast -->
+<div id="toast" class="app-toast" role="status"></div>
+
+<!-- 通用弹窗（Bootstrap Modal：手机全屏，桌面居中） -->
+<div class="modal fade" id="appModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable modal-fullscreen-sm-down">
+    <div class="modal-content">
+      <div class="modal-header py-2">
+        <h5 class="modal-title text-truncate fs-6" id="appModalTitle"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+      </div>
+      <div class="modal-body" id="appModalBody"></div>
+    </div>
+  </div>
+</div>
+
+<script src="static/bootstrap.bundle.min.js"></script>
+<script src="static/highlight.min.js"></script>
+<script src="static/app.js"></script>
+</body>
+</html>

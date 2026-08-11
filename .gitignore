@@ -1,0 +1,15 @@
+# Python 字节码缓存
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行时日志
+*.log
+
+# 视频缩略图缓存（运行时自动生成，可随时重建）
+static/thumbs/
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec
