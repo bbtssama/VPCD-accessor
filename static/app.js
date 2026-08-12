@@ -2631,7 +2631,8 @@ function tagRenderEmpty() {
   const hint = $("tagHint");
   if (hint) hint.textContent = "";
 }
-// 点击标签：追加到搜索框（空格连接）并触发现有过滤；pulse 视觉反馈
+// 点击标签：追加到搜索框（空格连接）并触发现有过滤；pulse 视觉反馈。
+// 注意：标签含 / & ， 等字符时原样填入，会按查询语法解释为 OR/AND 分隔（预期行为，不做转义；空格仍作 AND）。
 function tagApplyTag(ev, word) {
   const input = $("searchInput");
   const curVal = input.value.trim();
@@ -2770,14 +2771,15 @@ function fuzzyMatchKw(kw, target) {
   const sPerm = FUZZY_PERM_WMIX * sMulti + (1 - FUZZY_PERM_WMIX) * Math.max(sLcs, sEdit);
   return sPerm >= FUZZY_SCORE_MIN;            // 乱序加权
 }
-// 多关键词 AND 判定：每个 kw 至少命中一个文本部件（对应 entrySearchText 的搜索模式）
-function fuzzyMatchTexts(terms, texts) {
-  return terms.every(kw => {
+// 多组 OR 判定：任一组内所有 kw 均至少命中一个文本部件（对应 entrySearchText 的搜索模式）。
+// groups 由 parseQuery 统一解析（[{and:[词,...]},...]），精确/模糊两阶段共用同一语义。
+function fuzzyMatchTexts(groups, texts) {
+  return groups.some(g => g.and.every(kw => {
     for (let i = 0; i < texts.length; i++) {
       if (fuzzyMatchKw(kw, texts[i])) return true;
     }
     return false;
-  });
+  }));
 }
 // ===== 模糊匹配核心结束 =====
 // 硬筛选（不含搜索词）：类型多选(OR) + 自输入后缀(OR)。
@@ -2795,19 +2797,29 @@ function applyHardFilters(entries) {
   }
   return out;
 }
-// 过滤管道：硬筛选 + 搜索词精确子串（AND 多关键词，匹配文件名+meta 元信息）。
+// 查询解析：输入为已归一化（normSearch）的查询串，输出 [{and:[词1,词2,...]}, ...]。
+//  - OR 分隔符：, ， | /（切分成多组，任一组命中即匹配）
+//  - AND 分隔符：空格 与 &（组内所有词须全部命中）
+//  - 连续/混合分隔符取并集效果（如 "a,,b" 视为 a OR b）；空词自动过滤
+//  - 注意：/ 在文件名中常见，但按用户要求在此统一视为 OR 分隔符
+function parseQuery(q) {
+  const groups = [];
+  String(q || "").split(/[，,|/]/).forEach(seg => {
+    const and = seg.split(/[\s&]+/).filter(Boolean);
+    if (and.length) groups.push({ and });
+  });
+  return groups;
+}
+// 过滤管道：硬筛选 + 搜索词精确子串（多组 OR，组内 AND，匹配文件名+meta 元信息）。
 // 第一阶段（同步）只做精确子串；概率模糊匹配由 startFuzzyPass 异步补充。
-function filterEntries(entries, query) {
+// groups: parseQuery 结果，由 renderEntries 统一解析后传入（精确/模糊两阶段共用同一解析）。
+function filterEntries(entries, groups) {
   let out = applyHardFilters(entries);
-  const q = normSearch(query);
-  if (q) {
-    const terms = q.split(/\s+/).filter(Boolean); // 空格分词，多关键词 AND
-    if (terms.length) {
-      out = out.filter(e => {
-        const haystack = entrySearchText(e).join("\n");
-        return terms.every(t => haystack.indexOf(t) >= 0);
-      });
-    }
+  if (groups && groups.length) {
+    out = out.filter(e => {
+      const haystack = entrySearchText(e).join("\n");
+      return groups.some(g => g.and.every(t => haystack.indexOf(t) >= 0));
+    });
   }
   return out;
 }
@@ -2855,13 +2867,14 @@ function sortEntries(list) {
 function renderEntries() {
   const rows = $("fileRows");
   rows.classList.toggle("grid", view === "grid");
+  const groups = parseQuery(normSearch(searchQuery)); // 查询语法统一解析一次，精确/模糊两阶段共用
   if (!currentEntries.length) {
     rows.innerHTML = '<div class="empty">空目录</div>';
     _shownEntries = [];
-    startFuzzyPass();
+    startFuzzyPass(groups);
     return;
   }
-  const list = filterEntries(currentEntries, searchQuery); // 阶段一：精确子串 + 硬筛选
+  const list = filterEntries(currentEntries, groups); // 阶段一：精确子串 + 硬筛选
   sortEntries(list);
   if (!list.length) rows.innerHTML = '<div class="empty">无匹配项</div>';
   else {
@@ -2869,7 +2882,7 @@ function renderEntries() {
     list.forEach(e => rows.appendChild(view === "grid" ? gridItem(e) : listItem(e)));
   }
   _shownEntries = list.slice(); // 与 DOM children 顺序一一对应
-  startFuzzyPass();             // 阶段二：未命中文件的概率模糊匹配（异步）
+  startFuzzyPass(groups);       // 阶段二：未命中文件的概率模糊匹配（异步）
 }
 // ============================================================================
 // 两阶段搜索第二阶段：异步概率模糊匹配 + 排序插入
@@ -2892,11 +2905,11 @@ function fuzzyHideHint() {
   const el = $("fuzzyHint");
   if (el) { el.classList.add("d-none"); el.textContent = ""; }
 }
-// 单个 entry 的模糊判定：按当前搜索模式取可搜索文本（entrySearchText），多关键词 AND
-function fuzzyMatchEntry(e, terms) {
+// 单个 entry 的模糊判定：按当前搜索模式取可搜索文本（entrySearchText），多组 OR、组内 AND
+function fuzzyMatchEntry(e, groups) {
   let texts = e._fuzzyTexts;
   if (!texts) { texts = e._fuzzyTexts = entrySearchText(e); }
-  return fuzzyMatchTexts(terms, texts);
+  return fuzzyMatchTexts(groups, texts);
 }
 // 二分查找插入点：_shownEntries 已排序，找到第一个 entryCompare(e, it) < 0 的位置
 function sortedInsertIndex(e) {
@@ -2919,13 +2932,11 @@ function insertIntoSortedDom(e) {
   rows.insertBefore(node, rows.children[idx] || null);
 }
 // 启动模糊补充：只处理"通过硬筛选但未精确命中"的文件；无搜索词/无可查文件时直接返回
-function startFuzzyPass() {
+function startFuzzyPass(groups) {
   _fuzzyToken++; // 使上一轮未完成的模糊任务失效
   if (_fuzzyTimer) { clearTimeout(_fuzzyTimer); _fuzzyTimer = null; }
   fuzzyHideHint();
-  const q = normSearch(searchQuery);
-  const terms = q.split(/\s+/).filter(Boolean);
-  if (!terms.length) return; // 无搜索词：全部精确命中，无需模糊
+  if (!groups || !groups.length) return; // 无搜索词：全部精确命中，无需模糊
   const shown = new Set(_shownEntries.map(x => x.path));
   const queue = applyHardFilters(currentEntries).filter(x => !shown.has(x.path));
   if (!queue.length) return;
@@ -2935,20 +2946,20 @@ function startFuzzyPass() {
   _fuzzyDone = 0;
   const myToken = _fuzzyToken;
   fuzzyShowHint();
-  _fuzzyTimer = setTimeout(() => fuzzyStep(myToken, terms), 0);
+  _fuzzyTimer = setTimeout(() => fuzzyStep(myToken, groups), 0);
 }
 // 模糊分片：每批 FUZZY_BATCH 个文件，命中即插入 DOM；令牌失效（新输入）立即停止
-function fuzzyStep(token, terms) {
+function fuzzyStep(token, groups) {
   if (token !== _fuzzyToken) return; // 已被新输入/重渲染打断
   const end = Math.min(_fuzzyDone + FUZZY_BATCH, _fuzzyQueue.length);
   for (let i = _fuzzyDone; i < end; i++) {
     const e = _fuzzyQueue[i];
-    if (fuzzyMatchEntry(e, terms)) insertIntoSortedDom(e);
+    if (fuzzyMatchEntry(e, groups)) insertIntoSortedDom(e);
   }
   _fuzzyDone = end;
   if (end < _fuzzyQueue.length) {
     fuzzyShowHint();
-    _fuzzyTimer = setTimeout(() => fuzzyStep(token, terms), 0); // 让出主线程
+    _fuzzyTimer = setTimeout(() => fuzzyStep(token, groups), 0); // 让出主线程
   } else {
     _fuzzyTimer = null;
     fuzzyHideHint();
