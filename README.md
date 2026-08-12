@@ -157,7 +157,7 @@
 |---|---|---|---|
 | GET | `/` | - | 主页面 index.html |
 | GET | `/static/<name>` | - | 离线静态资源（白名单，见第 10 节） |
-| GET | `/api/info` | - | `{roots, pinned, archive_format}`（固定 `zip`） |
+| GET | `/api/info` | - | `{roots, pinned, archive_format, urls, urls_http}`：`urls`/`urls_http` 为本机全部可访问地址数组（http 免证书版用于局域网/本机直连，元素形如 `http://<ip>:<port>/<token>/`；不含回环 127.0.0.1 的地址也可供直连下载选址，见第 7.4 节；`_urls` `server.py:4167` / `_urls_http` `server.py:4174`） |
 | GET | `/api/list` | `path`、`meta=1` | 目录列表 `{path, parent, entries[]}`；`meta=1` 给每个 entry 附加 `meta`（kind/mime、视频 duration/width/height + title/author/type/tags/notes，见第 5.4 节）；无权限 403 + parent 供"返回上级" |
 | GET | `/api/pin` | `path`、`add=1\|0` | 置顶/取消置顶，返回最新 pinned 列表 |
 | GET | `/api/stat` | `path` | 文件/目录详情（含 preview 类型、视频 details、locked） |
@@ -184,7 +184,7 @@
 | GET | `/dlzip` | `paths`(竖线分隔)、`mode=store\|fast\|normal` | 多文件/目录**同步**打包下载 zip（`X-Archive-Format: zip`、失败跳过清单 `X-Archive-Skipped` 头；`_stream_archive` `server.py:3586`） |
 | GET | `/api/archives` | - | 打包中心任务列表（轻量快照 `{tasks:[...]}`；惰性执行 TTL 清理与上限逐出，`_archive_poll_cleanup` `server.py:3863`） |
 | GET | `/api/archive` | `id` | 单任务详情（含完整 `skipped` 跳过清单）；不存在 404 |
-| GET | `/api/archive/dl` | `id` | 原生下载已就绪的 zip：仅 `ready/done` 放行，其它 409 `{"error":"压缩尚未完成"}`；流完成置 `done`，断连回滚 `ready` 可再下载（`_archive_dl` `server.py:3919`） |
+| GET | `/api/archive/dl` | `id` | 原生下载已就绪的 zip：仅 `ready/done` 放行，其它 409 `{"error":"压缩尚未完成"}`；流完成置 `done`，断连回滚 `ready` 可再下载（`_archive_dl` `server.py:3960`） |
 | GET | `/api/archive/preview` | `paths`(竖线分隔) | 打包预览统计：文件行 `{name,is_dir,size}`、目录行 `{name,is_dir,size:null,child_count,child_bytes}`（权限失败 `child_count=-1`）；全部走 `_resolve` 越界校验 |
 | POST | `/api/archive` | body JSON `{paths:[...], mode}` | 创建后台打包任务：`mode` 非法回退 normal；排队上限（`_ARCHIVE_QUEUE_MAX` `server.py:3359`）达到 → 429 `{queue_full:true,"error":"打包任务过多，请稍后再试"}`；成功返回 `{task_id}` |
 | POST | `/api/archive/cancel` | `id` | 取消/删除任务：活任务（queued/scanning/compressing/downloading）置取消事件收敛 `aborted`；终态立即删任务+临时文件；不存在 404 |
@@ -290,7 +290,8 @@
 - **并发排队**：`_ARCHIVE_QUEUE_MAX=6`（queued+scanning+compressing 计数，超限 429 `queue_full`）；信号量 `_ARCHIVE_SEM`（2，与同步 `/dlzip` 共享）即排队，worker `finally` 必 release；`_ARCHIVE_TASK_CAP=16` 任务表上限 + 30min TTL 惰性逐出（`_archive_poll_cleanup` `server.py:3863`，在 `/api/archives` 与创建时执行，无后台守线程）。
 - **临时文件**：任务 zip 统一 `tempfile.gettempdir()/tk_<task_id>.zip`（可预测名字）；worker 压缩期先 mkstemp+unlink 让 ZipFile 自建、完成后 `rename` 到固定名；`_start` 启动清扫 `_archive_sweep_tmp`（`server.py:3693`）glob 精确匹配删除崩溃残留。
 - **分块进度**：`_write_entry_chunked`（`server.py:3508`）按 1MB 块（`_ARCHIVE_CHUNK`）写 zip，推进度/当前文件/取消检查；`force_zip64` 决策与 `zf.write` 一致（>2GB 文件才启用），**实测同一目录同步 `/dlzip`（zf.write）与任务（分块写）产出 zip md5 完全一致**。
-- **原生下载**：`GET /api/archive/dl?id=`（`_archive_dl` `server.py:3919`）Content-Length + `Content-Disposition: attachment; filename*=UTF-8''打包下载_<ts>.zip`，前端 `location.href` 直链（无 Blob 不占内存）；每 4MB 更新 `bytes_sent` 供下载进度。
+- **原生下载**：`GET /api/archive/dl?id=`（`_archive_dl` `server.py:3960`）Content-Length + `Content-Disposition: attachment; filename*=UTF-8''打包下载_<ts>.zip`，前端 `location.href` 直链（无 Blob 不占内存）；每 4MB 更新 `bytes_sent` 供下载进度。
+- **大包直连**：`dl_total_bytes ≥ 200MB`（`DIRECT_DL_THRESHOLD` `app.js:3278`）的任务卡在「⬇ 下载」旁提示「⚠️ 经域名下载大包可能触发网关超时，建议直连」并给出「📋 复制直连下载链接」（`copyDirectDl` `app.js:3371`）——把任务 id 拼到直连地址 `<scheme>://<ip>:<port>/<token>/api/archive/dl?id=<task_id>` 上。直连地址来自 `/api/info` 的 `urls`/`urls_http`，前端选址规则（`pickDirectBase` `app.js:3342`）：**优先局域网可达**（私网 IPv4 10/8、172.16/12、192.168/16，或 ULA IPv6 fd/fc 开头），其次任意**非回环非链路本地**地址（公网 IPv6），排除 127.0.0.1/::1（手机/另一台设备上不可用）；旧后端无 `urls` 字段或列表为空时自动隐藏该区块（判空容错）。复制走 `navigator.clipboard`，自签名证书（非 secure context）下自动退化为 `execCommand('copy')`。
 - **置顶折叠**：置顶卡头部可点击折叠（CSS `.pinned-fold`，`index.html`），**默认切目录即收起**（`loadList` `app.js:3089-3114`），chevron ▲/▼ 同步，不持久化。
 - **预览统计**：`/api/archive/preview` 对目录返回 `child_count/child_bytes`（首层文件大小和），权限失败 `child_count=-1`；面板内"▶"点击拉取行内展示，不递归。
 
@@ -346,7 +347,7 @@
 
 - **token 前缀保护**：所有主站 API 必须带 `/transfer/` 前缀（`server.py:994-997`），否则 403；`/transfer` 无斜杠会 301 到 `/transfer/`（`server.py:998-1003`）。分享路由 `/s/` 独立于主 token，二者互不暴露。
 - **路径越界校验**：`_resolve`（`server.py:285`）用 `realpath + commonpath` 保证请求路径必在 roots 内（防符号链接逃逸）；分享用 `_resolve_share_path`（`server.py:304`），多文件分享是**白名单精确匹配**而非前缀匹配——父目录路径访问未分享文件会被拒绝。
-- **静态资源白名单**：`_send_static`（`server.py:142`）只允许顶层 6 个指定文件（含 cjk-normalize.js）与 `icons/*.svg`，basename + 无斜杠双重校验，杜绝路径穿越。
+- **静态资源白名单**：`_send_static`（`server.py:145`）只允许顶层 6 个指定文件（含 cjk-normalize.js）与 `icons/*.svg`，basename + 无斜杠双重校验，杜绝路径穿越。
 - **`cgi` 模块弃用警告**：`server.py:20` 导入 `cgi`（Python 3.13 起弃用，3.15 移除），上传用 `cgi.FieldStorage` 解析 multipart（`server.py:1300`）；未来需替换为手写 multipart 解析。
 - **HTTP 明文（同上端口 8443）**：仅用于手机打不开自签名证书页面时的局域网兜底，明文传输，仅限可信网络（启动提示已注明）；服务端靠首字节嗅探区分 TLS/明文，`http://` 与 `https://` 均可访问同一端口。
 - **只读为主 + 上传**：服务不能删除/修改服务器端已有文件，只能上传到当前目录；分享模式连上传也禁用。
@@ -362,4 +363,18 @@
 - **模糊匹配的边界**：仅对硬筛选后的未命中文件做概率匹配，超长文本截断到 200 字符（`FUZZY_TARGET_MAX`）；错字/转位容忍约 1-2 字（滑窗宽 len+2）；**3 字以上完全乱序不匹配**（乱序加权 0.6/0.4 + 0.8 阈值的设计边界）；预筛阈值 0.6 意味着字符多集覆盖率不足的直接跳过。
 - **关键词语法注意**：`/` 与 `，,|` 都是 **OR 分隔符**——搜索串含 `/` 时会被拆成多组"或"查询（如 `a/b` 视为 `a OR b`）；点击推荐标签时若标签本身含 `/`、`,` 等字符也会按语法解释（预期行为，不做转义，`app.js:2635` 注释）。
 - **虚拟分享路径含 `/`**：虚拟分享的目录导航用 `/` 分隔虚拟路径，其文件名本身不含 `/`，但搜索框直接输入虚拟路径片段时需注意 `/` 会被当作 OR 分隔符。
-- **单实例约束**：`_DriveServer.allow_reuse_address = False`（`server.py:1355`）+ 启动脚本的残留实例清理/端口检查（`启动网盘.bat:13-25`），杜绝"新旧实例共同监听一个端口、请求随机分发"的问题。
+- **单实例约束**：`_DriveServer.allow_reuse_address = False`（`server.py:1465`）+ 启动脚本的残留实例清理/端口检查（`启动网盘.bat:13-25`），杜绝"新旧实例共同监听一个端口、请求随机分发"的问题。
+- **本地/局域网访问被代理拦 502**：症状——浏览器访问 `http://localhost:8443`（或 127.0.0.1）返回 **502 Bad Gateway**，但命令行 `Invoke-WebRequest`/curl 直连完全正常、netstat 显示服务正常监听。根因——本机装有 mihomo/Clash 类代理软件且系统代理/浏览器代理开启时，浏览器把 localhost 与 127.0.0.1 请求也交给本地代理 127.0.0.1:7890，代理对"非代理网络目标（本机/局域网）"直接回 502（实测 localhost 与 127.0.0.1 都会被拦，**不是服务端问题**）。解决（任选其一）：
+  - 在代理软件的**绕行/直连规则**中加入 `localhost`、`127.0.0.1` 与局域网段（如 `192.168.*`、`10.*`，mihomo 可在配置中对该目标走 DIRECT）；
+  - Edge 等浏览器"系统代理"关闭，或浏览器代理插件将本机地址加入 bypass 列表；
+  - 直接关闭系统代理（`设置 → 网络和 Internet → 代理`）；
+  - 服务端 CLI 启动时若检测到系统代理开启，会自动在 stderr 打印同类提示（`_system_proxy_hint` `server.py:4421`）。
+- **Cloudflare 代理下载大包 524**：症状——打包完成后在浏览器点「下载」走 `transfer.wangxin2003.site` 域名，大 zip 下载中途出现 **524 error** 页面；命令行/局域网直连却正常。根因——域名走了 Cloudflare 代理，CF 与源站之间的连接 **100 秒超时**（524 即"连接源站超时"），大包流式发送在 100s 内发不完必然触发。解决：
+  - 用**直连地址**下载：打包中心对 `dl_total_bytes ≥ 200MB` 的任务自动显示「⚠️ 经域名下载大包可能触发网关超时，建议直连」+「📋 复制直连下载链接」按钮（地址取 `/api/info` 的 `urls`/`urls_http`，优先局域网 IPv4，见第 7.4 节），把链接粘到浏览器即可绕过 CF 直连源站；
+  - 或在 Cloudflare 面板把该域名的代理模式（橙色云）改为 **DNS-only（灰色云）**，流量不再经过 CF，也就没有 100s 限制；
+  - 若直连地址对手机不可达（如公网 IPv6 不通），请用同一局域网（Wi-Fi）设备测试，或靠端口转发/内网穿透直连源站。
+- **缓存控制头策略**（防夸克等激进缓存浏览器长期展示旧版页面/旧 app.js）：
+  - 动态内容一律 `Cache-Control: no-store`，绝不缓存：主/分享页 HTML（`_send_html` `server.py:136`）、全部 JSON API（`_send_json` `server.py:127`）、错误页、视频流/字幕/转码分片，以及 `/dl`、`/dlzip`、`/api/unpackdl`、`/api/archive/dl` 等下载响应与 301/416，均不可缓存（附件下载禁用缓存同时不影响 Range 断点续传）。
+  - 静态资源不可"长缓存"：`_send_static`（`server.py:145`）对 app.js / bootstrap.* / highlight.* / cjk-normalize.js / icons/*.svg 返回 `Cache-Control: no-cache` + 弱 `ETag`（mtime+size 派生，`W/"…"`）+ `Last-Modified`，并支持 `If-None-Match`/`If-Modified-Since` 命中回 304 空体——浏览器可存储但每次回源校验：文件未变时仅 304 极小开销，改版后（mtime/size 变化）必然拿到新内容，杜绝启发式缓存长期命中旧版资源。**注意：静态资源 URL 无版本号，若未来改用 `max-age` 长缓存，需先给引用加版本参数或内容寻址文件名**。
+  - 视频缩略图（/api/thumb、分享页 /s/.../api/thumb、vthumbstrip、vframes）沿用 `max-age=86400`：文件名本身是视频内容 md5 寻址，天然不可变，允许长缓存（`server.py:588/615/887/1144`）。
+  - 缓存失效兜底：用户端首次更新后如遇残留旧资源，在浏览器清一次站点缓存即可，此后改版无需再清。

@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import argparse
+import calendar
 import cgi
 import ctypes
 import datetime
+import email.utils
 import hashlib
 import html
 import ipaddress
@@ -146,6 +148,11 @@ class _DriveHandler(BaseHTTPRequestHandler):
         白名单 + basename 双重校验，杜绝路径穿越：
           * 顶层文件：bootstrap.min.css / bootstrap.bundle.min.js / app.js / highlight.min.js
           * 图标目录：static/icons/<name>.svg（name 由白名单+扩展名校验）
+
+        缓存策略（防夸克式激进缓存拿到旧版 app.js）：
+        静态资源 URL 无版本号，故禁绝长缓存—— Cache-Control: no-cache 允许浏览器存储，
+        但每次使用前必须回源校验；ETag（弱校验，mtime+size）+ Last-Modified 命中时回 304
+        空体，正常网络下几乎没有下载开销，文件一旦改版（mtime/size 变化）立即拿到新内容。
         """
         rel = route[len("/static/"):].lstrip("/")
         name = os.path.basename(rel)
@@ -156,8 +163,32 @@ class _DriveHandler(BaseHTTPRequestHandler):
         else:
             self._send_json({"error": "404"}, 404)
             return
-        if not os.path.isfile(spath):
+        try:
+            st = os.stat(spath)
+        except OSError:
             self._send_json({"error": "404"}, 404)
+            return
+        # 弱 ETag：文件 mtime+size 足以区分改版，无需读盘算强校验
+        etag = 'W/"%x-%x"' % (st.st_mtime_ns, st.st_size)
+        last_mod = self.date_time_string(st.st_mtime)
+        # If-None-Match 优先（浏览器同时携带两个条件头时按 ETag 判定）
+        inm = self.headers.get("If-None-Match")
+        ims = self.headers.get("If-Modified-Since")
+        fresh = False
+        if inm:
+            fresh = inm.strip() in (etag, "*")
+        elif ims:
+            try:
+                t = email.utils.parsedate(ims)
+                fresh = t is not None and int(st.st_mtime) <= calendar.timegm(t)
+            except (TypeError, ValueError, OverflowError):
+                fresh = False
+        if fresh:
+            self.send_response(304)
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("ETag", etag)
+            self.send_header("Last-Modified", last_mod)
+            self.end_headers()
             return
         if name.endswith(".css"):
             ctype = "text/css; charset=utf-8"
@@ -169,8 +200,11 @@ class _DriveHandler(BaseHTTPRequestHandler):
             data = fh.read()
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        # 静态资源只短缓存：前端迭代频繁，避免手机 24h 内拿不到新版 app.js
-        self.send_header("Cache-Control", "max-age=60")
+        # no-cache：可存储但每次回源校验，杜绝启发式缓存（无新鲜度信息时
+        # 浏览器按 Last-Modified 自算新鲜度）长期展示旧版资源
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("ETag", etag)
+        self.send_header("Last-Modified", last_mod)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -1007,6 +1041,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         if self.path == tok:
             self.send_response(301)
             self.send_header("Location", tok + "/")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
@@ -1019,10 +1054,13 @@ class _DriveHandler(BaseHTTPRequestHandler):
             # 离线内置 Bootstrap 静态资源（白名单文件名，杜绝路径穿越）
             self._send_static(route)
         elif route == "/api/info":
+            port = self.server.server_address[1]
             self._send_json({
                 "roots": list(self.server.roots),
                 "pinned": list(self.server.pinned),
                 "archive_format": "zip",
+                "urls": _urls(port, self.server.token),
+                "urls_http": _urls_http(port, self.server.token),
             })
         elif route == "/api/list":
             p = self._resolve(q.get("path") or self.server.roots[0])
@@ -3308,6 +3346,7 @@ def _unpack_list(path):
 def _range_unsatisfiable(handler, fsize):
     handler.send_response(416)
     handler.send_header("Content-Range", "bytes */%d" % fsize)
+    handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", "0")
     handler.end_headers()
 
@@ -3330,6 +3369,7 @@ def _unpack_download(handler, archive, entry):
                 handler.send_header("Content-Type", "application/octet-stream")
                 handler.send_header("Content-Length", str(info.file_size))
                 handler.send_header("Content-Disposition", disp)
+                handler.send_header("Cache-Control", "no-store")
                 handler.end_headers()
                 with zf.open(entry) as src:
                     shutil.copyfileobj(src, handler.wfile)
@@ -3644,6 +3684,7 @@ def _stream_archive(handler, items, mode="normal"):
                 "Content-Disposition",
                 "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
             )
+            handler.send_header("Cache-Control", "no-store")
             handler.send_header("X-Archive-Format", "zip")
             if skipped:
                 # 跳过清单 URL 编码 JSON 放响应头，供前端解析展示；
@@ -3944,6 +3985,7 @@ def _archive_dl(handler, task):
             "Content-Disposition",
             "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
         )
+        handler.send_header("Cache-Control", "no-store")
         handler.send_header("X-Archive-Format", "zip")
         handler.end_headers()
         sent = 0
@@ -4091,8 +4133,40 @@ def _public_ipv6():
     return out
 
 
+def _private_ipv4():
+    """本机私网 IPv4（局域网内可直达，手机/另一台电脑可用）。"""
+    out, seen = [], set()
+
+    def _add(ip):
+        if ip in seen:
+            return
+        seen.add(ip)
+        try:
+            a = ipaddress.ip_address(ip)
+        except ValueError:
+            return
+        if a.is_loopback or a.is_link_local or not a.is_private:
+            return
+        out.append(ip)
+
+    try:
+        # UDP 假连接不实际发包，仅让系统选出默认路由网卡的地址
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            _add(s.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            _add(info[4][0])
+    except OSError:
+        pass
+    return out
+
+
 def _urls(port, token):
     urls = ["https://[%s]:%d/%s/" % (ip, port, token) for ip in _public_ipv6()]
+    urls += ["https://%s:%d/%s/" % (ip, port, token) for ip in _private_ipv4()]
     urls.append("https://127.0.0.1:%d/%s/" % (port, token))
     return urls
 
@@ -4100,6 +4174,7 @@ def _urls(port, token):
 def _urls_http(port, token):
     """HTTP 明文访问 URL（与 HTTPS 同一端口，首字节嗅探自动识别协议）。"""
     urls = ["http://[%s]:%d/%s/" % (ip, port, token) for ip in _public_ipv6()]
+    urls += ["http://%s:%d/%s/" % (ip, port, token) for ip in _private_ipv4()]
     urls.append("http://127.0.0.1:%d/%s/" % (port, token))
     return urls
 
@@ -4343,6 +4418,29 @@ def _under(root, path):
 # --------------------------------------------------------------------- CLI
 
 
+def _system_proxy_hint(port):
+    """检测 Windows 系统代理是否开启，开启时提示浏览器访问本机地址可能被代理拦 502。"""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+        ) as k:
+            if not winreg.QueryValueEx(k, "ProxyEnable")[0]:
+                return None
+            server = winreg.QueryValueEx(k, "ProxyServer")[0]
+    except OSError:
+        return None
+    return (
+        "检测到系统代理已开启（%s）。浏览器访问 http://localhost:%d（或 127.0.0.1）"
+        "可能被代理软件拦截返回 502 Bad Gateway，而命令行直连正常。\n"
+        "解决：在浏览器代理排除列表中加入 localhost;127.0.0.1;局域网段（如 192.168.*），"
+        "或在代理软件规则中将本机/局域网地址改为直连，或关闭系统代理/浏览器代理插件。"
+    ) % (server, port)
+
+
 def _cli_serve(root, port, token=None):
     try:
         info = _start(root, port, token)
@@ -4355,6 +4453,9 @@ def _cli_serve(root, port, token=None):
         print(u + "  (HTTP 免证书明文，与 HTTPS 同端口；手机打不开 https 证书页时把 https:// 改成 http://)")
     print("根目录: %s" % ", ".join(info["roots"]))
     print("打包格式: %s" % info["archive_format"])
+    hint = _system_proxy_hint(port)
+    if hint:
+        sys.stderr.write(hint + "\n")
     print("按 Ctrl+C 停止服务")
     try:
         while True:

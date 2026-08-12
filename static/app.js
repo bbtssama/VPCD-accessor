@@ -2253,6 +2253,8 @@ async function init() {
   const info = await api("api/info");
   roots = info.roots || [];
   pinned = info.pinned || [];
+  infoUrls = Array.isArray(info.urls) ? info.urls : [];
+  infoUrlsHttp = Array.isArray(info.urls_http) ? info.urls_http : [];
   setPackBtn();
   renderDriveTabs();
   renderPinned();
@@ -3269,6 +3271,11 @@ let packMode = "normal";     // store | fast | normal（面板内单选）
 let archTasks = {};          // task_id -> 轻量任务快照（轮询重建/更新）
 const archFinalStates = ["ready", "done", "failed", "aborted"];
 let archPollTimer = null;    // 轮询定时器（页面隐藏时暂停）
+let infoUrls = [];           // /api/info 返回的直连地址（https），旧后端无该字段时为空
+let infoUrlsHttp = [];       // 同上（http 免证书，局域网/本机适用）
+// 阈值理由：Cloudflare → origin 100s 超时，家庭上行普遍 ≤2MB/s，约 200MB 起才会撞 100s
+// 上限；更大的包经域名下载必 524，小于该值一般来得及发完（200MB 定阈值避免频繁打扰）
+const DIRECT_DL_THRESHOLD = 200 * 1024 * 1024;
 
 function openPanel() {
   $("packPanel").classList.remove("d-none");
@@ -3330,6 +3337,59 @@ function renderArchPanel() {
   updateTotal();
 }
 
+// 直连下载地址选取：优先局域网可达（私网 IPv4 / ULA IPv6），其次任意非回环地址；
+// 127.0.0.1 在手机/另一台设备上无法使用，故排除回环与链路本地
+function pickDirectBase() {
+  const hostOf = u => { try { return new URL(u).hostname.replace(/^\[|\]$/g, ""); }
+                        catch (e) { return ""; } };
+  const isLanIpv4 = h => {
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (!m) return false;
+    const p = m.slice(1).map(Number);
+    if (!p.every(n => n >= 0 && n <= 255)) return false;
+    return p[0] === 10 || (p[0] === 172 && p[1] >= 16 && p[1] <= 31) ||
+           (p[0] === 192 && p[1] === 168);
+  };
+  const isUsable = h => h && h !== "127.0.0.1" && h !== "::1" && h !== "localhost" &&
+                         !/^fe80/i.test(h);
+  const lists = [infoUrlsHttp, infoUrls];
+  for (const list of lists) {
+    for (const u of list) {
+      const h = hostOf(u).toLowerCase();
+      if (isLanIpv4(h) || h.startsWith("fd") || h.startsWith("fc")) return u;
+    }
+  }
+  for (const list of lists) {
+    for (const u of list) {
+      const h = hostOf(u);
+      if (isUsable(h)) return u;
+    }
+  }
+  return null;
+}
+
+function copyDirectDl(id) {
+  const base = pickDirectBase();
+  if (!base) { toast("未获取到直连地址（需新版服务端）"); return; }
+  const url = base + "api/archive/dl?id=" + encodeURIComponent(id);
+  const doCopy = navigator.clipboard && window.isSecureContext
+    ? navigator.clipboard.writeText(url)
+    : new Promise((res, rej) => {
+        // 自签名证书下页面非 secure context，clipboard API 不可用，退化为 execCommand
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { /* 忽略 */ }
+        ta.remove();
+        ok ? res() : rej(new Error("copy failed"));
+      });
+  doCopy.then(() => toast("已复制直连下载链接"), () => toast("复制失败，请手动复制链接"));
+  return doCopy;
+}
+
 // 任务状态 → 进度/文案（含压缩中当前文件与下载进度）
 function taskStateUI(t) {
   const s = t.state;
@@ -3376,6 +3436,13 @@ function renderTask(t) {
             '<span class="small text-muted">' + st.detail + "</span>" +
             '<a class="btn btn-sm btn-primary" href="' + BASE + "api/archive/dl?id=" + encodeURIComponent(t.task_id) + '">⬇ 下载</a>' +
             "</div>";
+    if (t.dl_total_bytes >= DIRECT_DL_THRESHOLD && pickDirectBase()) {
+      card += '<div class="border-top pt-1 mt-1">' +
+              '<div class="small text-warning">⚠️ 经域名下载大包可能触发网关超时，建议直连</div>' +
+              '<div class="d-flex justify-content-end">' +
+              '<button class="btn btn-sm btn-outline-primary py-0" onclick="copyDirectDl(\'' + t.task_id + '\')">📋 复制直连下载链接</button>' +
+              "</div></div>";
+    }
   } else if (st.detail) {
     card += '<div class="small text-muted text-truncate mt-1">' + st.detail + "</div>";
   }
