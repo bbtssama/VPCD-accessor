@@ -46,10 +46,10 @@
 │   ├── server.py               # 主服务（约 4380 行）：单端口（HTTPS/HTTP 首字节嗅探）+ MCP/CLI 双模式，全部核心逻辑
 │   ├── mcp_stdio.py            # 零依赖 MCP stdio 框架（240 行）：JSON-RPC 2.0 行协议
 │   ├── templates/
-│   │   └── index.html          # 前端模板（约 359 行）：页面骨架 + 全部 CSS + 打包中心面板；每次请求实时读盘支持热更新
+│   │   └── index.html          # 前端模板（约 412 行）：页面骨架 + 全部 CSS + 打包中心面板；每次请求实时读盘支持热更新
 │   └── __pycache__/            # Python 字节码缓存（可删除）
 └── static/
-    ├── app.js                  # 前端主逻辑（约 3970 行）：列表/网格、侧边栏筛选/排序/搜索、推荐标签、模糊匹配、播放器、预览、分享、打包中心等
+    ├── app.js                  # 前端主逻辑（约 4080 行）：列表/网格、侧边栏筛选/排序/搜索、推荐标签、模糊匹配、播放器、预览、分享、打包中心等
     ├── cjk-normalize.js        # 简繁/日式新字体归一化映射表（opencc-data 1.4.1，28KB，全局 normalizeCJK）
     ├── bootstrap.min.css / bootstrap.bundle.min.js   # 离线 Bootstrap 5
     ├── highlight.min.css / highlight.min.js          # 离线代码高亮
@@ -222,8 +222,8 @@
 | 磁盘标签页 | 顶部横向滚动胶囊按钮，点击切换磁盘根 | `renderDriveTabs` `app.js:2295` |
 | 面包屑 + 后退/前进 | 分段导航；栈式前进后退（`_pushNav` `app.js:2409`，按钮 `app.js:2420-2421`） | `renderBreadcrumb` `app.js:2341` |
 | 列表/网格视图 | 网格视图视频显示 ffmpeg 缩略图封面（失败回退图标）；视图偏好持久化 | `listItem` `app.js:3118` / `gridItem` `app.js:3154` |
-| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消、「全部清空」（有置顶时显示，`clearPinBtn`，一键 `api/pin?clear=1`）与「📦 打包」按钮（打开打包中心面板）；**置顶卡头部可点击折叠**（默认切目录即收起，chevron ▲/▼ 同步，`index.html:205-226`），折叠头实时标题「📌 置顶文件 · N 项 · 共 X」；打包按钮不再 disabled（后台任务，随时可点） | `renderPinned` `app.js:2310`、`pinnedHead` 折叠 `app.js:2348-2352` |
-| 打包中心面板 | 右下角悬浮面板（`index.html:256-278`，CSS `index.html:154-183`）：任务列表每 1s 轮询重建（`pollArchives` `app.js:3301`，`document.hidden` 暂停、回前台立即刷新）；任务卡含状态机文案/阶段性进度条（排队/扫描为轨道条纹动画，压缩中显示「当前文件」与文件比兜底，就绪显示 zip 大小）/跳过清单展开（`renderTask` `app.js:3415`）、✕ 删除（活任务先本地置取消态再 POST，`removeTask` `app.js:3476`）、ready/done 显示「⬇ 下载」**原生下载**（`location.href = /api/archive/dl?id=`，无 Blob）；提交区：压缩级别单选 + 置顶项预览树（目录 ▶ 拉 `child_count/child_bytes` 行内统计，不递归，`createPackPreview` `app.js:3547`；无置顶时引导「先在文件列表点亮 ★」）+「＋ 提交打包」（`submitPack` `app.js:3592`）；面板头：任务完成 `x/y` 芯片（失败/取消计数）+ 活动摘要（打包中/下载中/待下载/扫描排队，窄屏隐藏）+ 总进度条（任务加权：done=1、其余非终态 ≤0.99，**100% ⟺ 全部完成**，`updateTotal` `app.js:3492`）；迷你条仅「有活动任务且面板关闭」时显示（修掉原先 n>0 即弹的 bug）；迷你条/面板互斥（头部点击折叠露头） | 见第 7.4 节 |
+| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消、「全部清空」（有置顶时显示，`clearPinBtn`，一键 `api/pin?clear=1`）与「📦 打包」按钮（打开打包中心面板）；**置顶卡头部可点击折叠**（默认切目录即收起，chevron ▲/▼ 同步，`index.html:258-275`），折叠头实时标题「📌 置顶文件 · N 项 · 共 X」；打包按钮不再 disabled（后台任务，随时可点） | `renderPinned` `app.js:2310`、`pinnedHead` 折叠 `app.js:2348-2352` |
+| 打包中心面板 | 右下角悬浮面板（`index.html:304-325`，CSS `index.html:186-232`）：任务列表每 1s 轮询重建（`pollArchives` `app.js:3301`，`document.hidden` 暂停、回前台立即刷新）；任务卡含状态机文案/阶段性进度条（排队/扫描为轨道条纹动画，压缩中显示「当前文件」与文件比兜底，就绪显示 zip 大小）/跳过清单展开（`renderTask` `app.js:3415`）、✕ 删除（活任务先本地置取消态再 POST，`removeTask` `app.js:3476`）、ready/done 显示「⬇ 下载」**原生下载**（`location.href = /api/archive/dl?id=`，无 Blob）；提交区：压缩级别单选 + 置顶项预览树（目录 ▶ 拉 `child_count/child_bytes` 行内统计，不递归，`createPackPreview` `app.js:3547`；无置顶时引导「先在文件列表点亮 ★」）+「＋ 提交打包」（`submitPack` `app.js:3592`）；面板头：任务完成 `x/y` 芯片（失败/取消计数）+ 活动摘要（打包中/下载中/待下载/扫描排队，窄屏隐藏）+ 总进度条（任务加权：done=1、其余非终态 ≤0.99，**100% ⟺ 全部完成**，`updateTotal` `app.js:3492`）；迷你条仅「有活动任务且面板关闭」时显示（修掉原先 n>0 即弹的 bug）；迷你条/面板互斥（头部点击折叠露头） | 见第 7.4 节 |
 | 上传 | 多文件顺序上传 + 进度条；分享模式无此按钮 | `app.js:3353-3385` |
 | 下载 | 非预览类型直接跳 `/dl`；统一 `dlUrl()`（`app.js:908`） | `bindRowAction` `app.js:3209` |
 | 视频播放器 | 画质选择（原画/高清/标清/低清）、**MSE 免证书模式**、缓存下载开关、字幕（track/overlay）、ASR 识别（语言切换）、进度条悬停预览（缩略图条 + 单帧 80ms 防抖）、视频详情面板（标题/作者/类型/统计/标签/技术徽章）、原画→高清自动降级 | `showVideo` `app.js:1164` |
@@ -238,16 +238,16 @@
 
 ### 7.1 侧边栏（视图与筛选）
 
-右侧滑出面板（HTML：`index.html:234-292`，CSS `index.html:128-151`），打开/关闭 `openSidebar`/`closeSidebar`（`app.js:2990-3001`），关闭不改变筛选状态。列表加载统一带 `meta=1`（`loadList` `app.js:3074-3080`），侧边栏所有操作**基于 `currentEntries` 前端过滤重渲染，不重新请求**。
+右侧滑出面板（HTML：`index.html:348-405`，CSS `index.html:158-183`），打开/关闭 `openSidebar`/`closeSidebar`（`app.js:2990-3001`），关闭不改变筛选状态。列表加载统一带 `meta=1`（`loadList` `app.js:3074-3080`），侧边栏所有操作**基于 `currentEntries` 前端过滤重渲染，不重新请求**。
 
 | 区块 | 说明 | 位置 |
 |---|---|---|
-| 搜索 | 输入即过滤，**150ms 防抖**（`app.js:3011-3016`）；先 `normalizeCJK` 简繁归一化再小写（`normSearch` `app.js:2449`） | `index.html:243-251` |
-| 深度查找开关 | 关闭：仅匹配文件名；开启：文件名 + 元数据内容白名单字段（`META_CONTENT_KEYS` `app.js:2456-2457`，仅 title/author/type/tags/notes/extra 等真实内容，**排除** kind/mime/duration/upload/views/likes/tech 等技术统计字段）；`entrySearchText` `app.js:2474` | `index.html:246-249`、`app.js:3025-3029` |
-| 推荐标签 | CJK bigram 分词 + tags 完整标签 + 内联 856 词停用词表（`STOPWORDS` `app.js:4-861`）+ 扩展名/版本号/日期噪声过滤（`isTagNoiseWord` `app.js:2498`）；按**出现文件数**计分（每文件最多计 1，`extractKeywords` `app.js:2511`）；异步分批（20 个/批）增量统计、随进度动态渐出 Top10（`startTagScan` `app.js:2556`、`tagScanStep` `app.js:2570`）；**per-path 缓存**（`_tagCache` `app.js:2550`），目录切换自动失效重扫（`loadList` `app.js:3113`），↻ 按钮手动强刷（`app.js:3020-3023`）；点击标签 → 追加搜索框 + **自动开启深度查找**（标签可能只存在于元数据，`tagApplyTag` `app.js:2636-2654`） | `index.html:252-259` |
-| 视图切换 | 列表/网格 radio 式按钮组，localStorage 持久化 | `index.html:261-266`、`app.js:2975-2985` |
-| 类型筛选（多选） | 视频/文本/编程/软件包/压缩包/快捷方式/目录 + 自输入后缀（逗号分隔，如 `md,txt,json`）；类型判定基于 meta.kind（`entryKindMatch` `app.js:2428`），硬筛选含后缀 OR 逻辑（`applyHardFilters` `app.js:2792`） | `index.html:267-279`、`app.js:3029-3033` |
-| 排序 | 修改时间/名称（本地化 zh-Hans-CN）/大小，**双向切换**：再次点击当前排序项即反转方向（原生 select 重复选择不触发 change，用 **mousedown+click 协作**手动反转，`app.js:3038-3057`）；默认方向 mtime 新→旧 / name 升序 / size 大→小（`DEFAULT_SORT_DIR` `app.js:2833`）；目录永远排前（`entryCompare` `app.js:2854`）；option 文本随方向动态更新（`updateSortLabel` `app.js:2840`） | `index.html:280-287` |
+| 搜索 | 输入即过滤，**150ms 防抖**（`app.js:3011-3016`）；先 `normalizeCJK` 简繁归一化再小写（`normSearch` `app.js:2449`） | `index.html:354-364` |
+| 深度查找开关 | 关闭：仅匹配文件名；开启：文件名 + 元数据内容白名单字段（`META_CONTENT_KEYS` `app.js:2456-2457`，仅 title/author/type/tags/notes/extra 等真实内容，**排除** kind/mime/duration/upload/views/likes/tech 等技术统计字段）；`entrySearchText` `app.js:2474` | `index.html:359-363`、`app.js:3025-3029` |
+| 推荐标签 | CJK bigram 分词 + tags 完整标签 + 内联 856 词停用词表（`STOPWORDS` `app.js:4-861`）+ 扩展名/版本号/日期噪声过滤（`isTagNoiseWord` `app.js:2498`）；按**出现文件数**计分（每文件最多计 1，`extractKeywords` `app.js:2511`）；异步分批（20 个/批）增量统计、随进度动态渐出 Top10（`startTagScan` `app.js:2556`、`tagScanStep` `app.js:2570`）；**per-path 缓存**（`_tagCache` `app.js:2550`），目录切换自动失效重扫（`loadList` `app.js:3113`），↻ 按钮手动强刷（`app.js:3020-3023`）；点击标签 → 追加搜索框 + **自动开启深度查找**（标签可能只存在于元数据，`tagApplyTag` `app.js:2636-2654`） | `index.html:366-372` |
+| 视图切换 | 列表/网格 radio 式按钮组，localStorage 持久化 | `index.html:374-379`、`app.js:2975-2985` |
+| 类型筛选（多选） | 视频/文本/编程/软件包/压缩包/快捷方式/目录 + 自输入后缀（逗号分隔，如 `md,txt,json`）；类型判定基于 meta.kind（`entryKindMatch` `app.js:2428`），硬筛选含后缀 OR 逻辑（`applyHardFilters` `app.js:2792`） | `index.html:380-392`、`app.js:3029-3033` |
+| 排序 | 修改时间/名称（本地化 zh-Hans-CN）/大小，**双向切换**：再次点击当前排序项即反转方向（原生 select 重复选择不触发 change，用 **mousedown+click 协作**手动反转，`app.js:3038-3057`）；默认方向 mtime 新→旧 / name 升序 / size 大→小（`DEFAULT_SORT_DIR` `app.js:2833`）；目录永远排前（`entryCompare` `app.js:2854`）；option 文本随方向动态更新（`updateSortLabel` `app.js:2840`） | `index.html:393-400` |
 | 重置 | 一键清空筛选/搜索/恢复默认排序 | `app.js:3059-3069` |
 
 ### 7.2 搜索关键词语法（parseQuery）
@@ -278,9 +278,9 @@
 **两阶段渲染**（`renderEntries` `app.js:2872`）：
 
 1. **阶段一（同步）**：硬筛选（类型/后缀）+ 精确子串过滤 → 排序 → 全量渲染，输入后立即出结果；
-2. **阶段二（异步渐进）**：未命中文件进模糊队列，每批 30 个（`FUZZY_BATCH` `app.js:2903`）分片处理（批间 setTimeout(0) 让出主线程），命中即以 `entryCompare` 二分查找插入正确排序位置（`insertIntoSortedDom` `app.js:2932`）；顶部 `fuzzyHint` 显示进度"正在模糊匹配… x/y"（`index.html:213`）；新输入/重渲染递增令牌使旧任务**可打断**（`app.js:2942-2974`）。
+2. **阶段二（异步渐进）**：未命中文件进模糊队列，每批 30 个（`FUZZY_BATCH` `app.js:2903`）分片处理（批间 setTimeout(0) 让出主线程），命中即以 `entryCompare` 二分查找插入正确排序位置（`insertIntoSortedDom` `app.js:2932`）；顶部 `fuzzyHint` 显示进度"正在模糊匹配… x/y"（`index.html:298`）；新输入/重渲染递增令牌使旧任务**可打断**（`app.js:2942-2974`）。
 
-**页面细节**：`index.html:7` 有 `<link rel="icon" href="data:,">` 消除 favicon 请求（避免 403 干扰）；品牌色覆盖 Bootstrap primary 为 `#2563eb`（`index.html:12-15`）；手机端触控目标 ≥44px（`index.html:123-127`）；侧边栏宽度 `min(320px, 86vw)`（`index.html:132`）。
+**页面细节**：`index.html:7` 有 `<link rel="icon" href="data:,">` 消除 favicon 请求（避免 403 干扰）；品牌色覆盖 Bootstrap primary 为 `#2563eb`（`index.html:12-15`）；手机端触控目标 ≥44px（`index.html:133-156`）；侧边栏宽度 `min(320px, 86vw)`（`index.html:162`）。
 
 ### 7.4 打包中心（后台任务）
 

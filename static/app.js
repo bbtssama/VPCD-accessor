@@ -2328,9 +2328,9 @@ function renderPinned() {
       '<span class="flex-shrink-0"><img src="' + (p.is_dir ? BASE + "static/icons/folder.svg" : iconUrl(p.name)) + '" width="18" height="18" alt="" style="vertical-align:-3px"></span>' +
       '<span class="pname flex-grow-1 text-truncate">' + esc(p.name) + "</span>" +
       '<span class="psize text-muted small flex-shrink-0 d-none d-sm-block">' + fmtSize(p.size) + "</span>" +
-      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="share">分享</button>' +
-      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="dl">下载</button>' +
-      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="unpin">取消</button>';
+      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="share" title="分享">🔗<span class="d-none d-sm-inline"> 分享</span></button>' +
+      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="dl" title="下载">⬇<span class="d-none d-sm-inline"> 下载</span></button>' +
+      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="unpin" title="取消置顶">✕<span class="d-none d-sm-inline"> 取消</span></button>';
     row.querySelector('[data-a="share"]').onclick = () => showShareDialog(p.path, p.name);
     row.querySelector('[data-a="dl"]').onclick = () => { location.href = dlUrl(p.path); };
     row.querySelector('[data-a="unpin"]').onclick = async () => {
