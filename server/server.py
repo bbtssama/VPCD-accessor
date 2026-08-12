@@ -1893,7 +1893,10 @@ def _meta_kind(ext):
 
 def _video_meta_cached(path):
     """meta=1 专用：仅从 _video_details_cache 读视频元数据，未命中返回 None。
-    绝不运行 ffprobe，保证列表读取零阻塞；探测由 _probe_video_meta 后台负责。"""
+    绝不运行 ffprobe，保证列表读取零阻塞；探测由 _probe_video_meta 后台负责。
+    除 duration/width/height 外，附带内容性字段 title/author/type/tags/notes，
+    全部取自缓存值 d["meta"]（与 _video_meta 输出一致，已从 tag/comment 解析），
+    零 IO；未探测过则缓存为 None，这些字段自然缺失，不触发任何探测。"""
     try:
         st = os.stat(path)
         ck = (os.path.realpath(path), st.st_size, int(st.st_mtime))
@@ -1912,6 +1915,15 @@ def _video_meta_cached(path):
             out["width"], out["height"] = int(w), int(h)
         except (ValueError, AttributeError):
             pass
+    m = d.get("meta") or {}
+    for k in ("title", "author", "type"):
+        v = m.get(k)
+        if v:
+            out[k] = v
+    for k in ("tags", "notes"):
+        v = m.get(k)
+        if v:
+            out[k] = list(v)
     return out or None
 
 

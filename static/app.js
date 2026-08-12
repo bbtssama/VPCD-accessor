@@ -13,9 +13,11 @@ let shareExpires = null;
 let shareVirtual = false;
 // 侧边栏筛选/排序/搜索状态（不重新请求，基于 currentEntries 过滤重渲染）
 let currentEntries = [];   // 当前目录完整 entries（含 meta.kind），筛选/排序/搜索的数据源
-let sortBy = "mtime";      // mtime(新→旧) | name(本地化) | size(大→小)
+let sortBy = "mtime";      // mtime | name | size（当前排序字段）
+let sortDir = -1;          // 相对默认方向的偏移：与默认方向同向为 1，反向为 -1
 let searchQuery = "";      // 搜索关键词（匹配文件名）
 let customExts = "";       // 自输入后缀（逗号分隔，如 md,txt,json）
+let searchMetaMode = false; // false=仅按文件名搜索；true=文件名+元数据内容搜索
 let sidebarOpen = false;   // 侧边栏开合状态
 
 const $ = (id) => document.getElementById(id);
@@ -1589,20 +1591,29 @@ function normSearch(s) {
   if (typeof normalizeCJK === "function") s = normalizeCJK(s);
   return s.toLowerCase();
 }
-// 收集 entry 可搜索文本：文件名 + meta 内所有字符串值（kind/mime/duration/width/height，
-// 以及视频 title/author/tags/notes 等——后端 meta 里有就匹配，没有就跳过）。
+// 元数据内容搜索白名单：只匹配"具体内容"字段，排除 kind/mime/duration/resolution/upload/views/likes/tech
+// 等技术标识或数值统计字段（这些字段名/值很容易在每个文件里重复出现，匹配没有意义）。
+const META_CONTENT_KEYS = ["title","author","type","tags","notes","extra",
+                           "track","album","artist","genre","comment","description","captions","lyrics"];
+function collectMetaValue(v, out) {
+  if (typeof v === "string") out.push(v);
+  else if (typeof v === "number" || typeof v === "boolean") out.push(String(v));
+  else if (Array.isArray(v)) v.forEach(x => collectMetaValue(x, out));
+  else if (v && typeof v === "object") Object.keys(v).forEach(k => collectMetaValue(v[k], out));
+}
+// 只收集白名单键的内容文本（字符串/数组逐项/对象取属性值），tags 里的实际标签值、notes/extra 均在此列
+function metaContentTexts(m) {
+  const out = [];
+  if (m && typeof m === "object") META_CONTENT_KEYS.forEach(k => collectMetaValue(m[k], out));
+  return out;
+}
+// 收集 entry 可搜索文本：
+//  - 文件名模式（默认）：只匹配 e.name
+//  - 元数据模式：e.name + meta 白名单内容字段（title/author/type/tags/notes/extra 等，
+//    不含 kind/mime/upload/views/likes 这类技术/统计字段，也不含 tech/duration/resolution）
 function entrySearchText(e) {
   const parts = [e.name];
-  const m = e.meta;
-  if (m && typeof m === "object") {
-    // 递归收集：普通字符串直接收；数组逐项；对象（如 tech:[{k,v}]、extra）取各属性值
-    const walk = v => {
-      if (typeof v === "string") parts.push(v);
-      else if (Array.isArray(v)) v.forEach(walk);
-      else if (v && typeof v === "object") Object.keys(v).forEach(k => walk(v[k]));
-    };
-    walk(m);
-  }
+  if (searchMetaMode) parts.push(...metaContentTexts(e.meta));
   return parts.map(normSearch);
 }
 // 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(AND 多关键词，匹配文件名+meta 元信息)。
@@ -1629,15 +1640,38 @@ function filterEntries(entries, query) {
   }
   return out;
 }
-// 排序（原地）：mtime 新→旧；name 本地化（目录排前，与后端默认一致）；size 大→小（目录排前）
+// 排序：三种排序均支持升/降双向。DEFAULT_SORT_DIR 为各字段默认符号（mtime -1 新→旧/name 1 升序/size -1 大→小），
+// sortDir 是乘在"升序比较器"上的符号系数（默认取 DEFAULT_SORT_DIR，反转时取反），"再次点击同一排序项"即翻转方向。
+const DEFAULT_SORT_DIR = { mtime: -1, name: 1, size: -1 };
+// 下拉 option 文本（索引 0=sortDir<0 降序，1=sortDir>0 升序），updateSortLabel 按当前实际方向动态更新
+const SORT_LABELS = {
+  mtime: ["修改时间（新 → 旧）", "修改时间（旧 → 新）"],
+  name: ["名称（Z → A）", "名称（A → Z）"],
+  size: ["大小（大 → 小）", "大小（小 → 大）"],
+};
+function updateSortLabel() {
+  const sel = $("sortSelect");
+  for (const o of sel.options) {
+    const labels = SORT_LABELS[o.value];
+    if (!labels) continue;
+    if (o.value === sortBy) {
+      o.text = labels[sortDir > 0 ? 1 : 0]; // 当前项显示实际方向
+    } else {
+      o.text = labels[DEFAULT_SORT_DIR[o.value] > 0 ? 1 : 0]; // 非当前项显示其默认方向
+    }
+  }
+}
+// 排序（原地）：各字段先按"升序"计算再乘 sortDir（mtime: -1 新→旧；name: ±1；size: -1 大→小）。
+// 目录永远排前（不随方向翻转），用户关注的是文件排序方向。
 function sortEntries(list) {
+  const dir = sortDir || 1;
   if (sortBy === "name") {
     list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) ||
-                        String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
+                        dir * String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
   } else if (sortBy === "size") {
-    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || ((b.size || 0) - (a.size || 0)));
+    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.size || 0) - (b.size || 0)));
   } else {
-    list.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.mtime || 0) - (b.mtime || 0)));
   }
 }
 // 统一渲染入口：从 currentEntries 过滤 → 排序 → 渲染（不再重新请求）
@@ -1694,25 +1728,57 @@ $("searchInput").addEventListener("input", () => {
   clearTimeout(_searchDebounce);
   _searchDebounce = setTimeout(renderEntries, 150);
 });
+// 搜索范围切换：文件名 / 文件名+元数据内容
+$("searchMetaToggle").addEventListener("change", () => {
+  searchMetaMode = $("searchMetaToggle").checked;
+  $("searchInput").placeholder = searchMetaMode ? "按文件名或元数据搜索…" : "按文件名搜索…";
+  renderEntries();
+});
 // 类型多选（change 事件代理）
 $("typeFilters").addEventListener("change", ev => {
   if (ev.target.matches("input[type=checkbox]")) { syncTypeChips(); renderEntries(); }
 });
 // 自输入后缀
 $("extInput").addEventListener("input", () => { customExts = $("extInput").value; renderEntries(); });
-// 排序
-$("sortSelect").addEventListener("change", () => { sortBy = $("sortSelect").value; renderEntries(); });
+// 排序：原生 select 在"再次点击当前项"时值不变、不触发 change，因此：
+//  - mousedown 标记"打开下拉"的那次点击（随后的 click 不处理，避免与选择动作混淆）
+//  - 打开下拉后再点（click 且 mousedown 标志已消费）→ 若点的还是当前项则手动反转方向
+//  - change 负责正常切换（选新字段 → 重置为该字段默认方向）
+let _sortDown = false;
+$("sortSelect").addEventListener("mousedown", () => { _sortDown = true; });
+$("sortSelect").addEventListener("click", () => {
+  if (_sortDown) { _sortDown = false; return; } // 打开下拉的那次点击
+  const v = $("sortSelect").value;
+  if (v === sortBy) { // 点击了下拉里当前已选中项：值不变，change 不触发 → 手动反转
+    sortDir = -sortDir;
+    updateSortLabel();
+    renderEntries();
+  }
+  // 值变化的情况交给 change 处理，避免重复
+});
+$("sortSelect").addEventListener("change", () => {
+  const v = $("sortSelect").value;
+  if (v === sortBy) return; // 正常流程不会出现（值不变不触发 change），防御
+  sortBy = v;
+  sortDir = DEFAULT_SORT_DIR[v];
+  updateSortLabel();
+  renderEntries();
+});
 // 一键重置筛选/排序/搜索
 $("resetFilterBtn").onclick = () => {
   document.querySelectorAll("#typeFilters input[type=checkbox]").forEach(cb => { cb.checked = false; });
   syncTypeChips();
   $("extInput").value = ""; customExts = "";
   $("searchInput").value = ""; searchQuery = "";
-  $("sortSelect").value = "mtime"; sortBy = "mtime";
+  $("searchMetaToggle").checked = false; searchMetaMode = false;
+  $("searchInput").placeholder = "按文件名搜索…";
+  $("sortSelect").value = "mtime"; sortBy = "mtime"; sortDir = DEFAULT_SORT_DIR.mtime;
+  updateSortLabel();
   renderEntries();
 };
 syncViewBtns();
 syncTypeChips();
+updateSortLabel();
 
 async function loadList(path, opts) {
   hideAlert();
