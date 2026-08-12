@@ -37,6 +37,7 @@ import threading
 import time
 import urllib.parse
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -716,6 +717,10 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         "locked": False,
                     })
                 entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+                if q.get("meta") == "1":
+                    # 虚拟分享：entry["path"] 是虚拟 key，探测视频需映射回真实路径
+                    _augment_entries_meta(
+                        entries, {e["path"]: nodes[e["path"]]["real"] for e in entries})
                 parent = None
                 if vpath:
                     idx = vpath.rfind("/")
@@ -748,6 +753,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         "locked": False,
                     })
                 entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
+                if q.get("meta") == "1":
+                    _augment_entries_meta(entries)
                 self._send_json({"path": "", "parent": None, "entries": entries})
                 return
             p = self._resolve_share_path(share, q.get("path") or share["root"])
@@ -762,6 +769,15 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 except OSError as exc:
                     self._send_json({"error": str(exc)}, 500)
                     return
+                if q.get("meta") == "1":
+                    _augment_entries_meta([{
+                        "name": share["name"],
+                        "path": p,
+                        "is_dir": False,
+                        "size": st.st_size,
+                        "mtime": int(st.st_mtime),
+                        "locked": False,
+                    }])
                 self._send_json({
                     "path": p, "parent": None,
                     "entries": [{
@@ -786,6 +802,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
             parent = None
             if os.path.realpath(p) != os.path.realpath(share["root"]):
                 parent = os.path.dirname(p)
+            if q.get("meta") == "1":
+                _augment_entries_meta(entries)
             self._send_json({"path": p, "parent": parent, "entries": entries})
             return
         if sub == "api/stat":
@@ -1011,6 +1029,9 @@ class _DriveHandler(BaseHTTPRequestHandler):
             if err:
                 self._send_json({"error": err}, 500)
                 return
+            if q.get("meta") == "1":
+                # 侧边栏元数据：kind/mime（+视频 duration/width/height），探测有预算不阻塞
+                _augment_entries_meta(entries)
             self._send_json({
                 "path": p,
                 "parent": _parent_of(p, self.server.roots),
@@ -1789,6 +1810,167 @@ def _video_details(path):
     if ck is not None:
         _video_details_cache[ck] = out
     return out
+
+
+# ------------------------------------------------------------------ meta=1（侧边栏元数据）
+# api/list?meta=1 为每个 entry 附加便于搜索/筛选的 meta 字段：分类 kind + mime，
+# 视频额外附 duration/width/height。重点约束：大目录（几千文件）绝不卡死——
+# 视频的 ffprobe 探测有并发上限与总预算，且多请求互斥；无 meta 参数时零附加开销。
+
+_VIDEO_PROBE_LOCK = threading.Lock()      # meta=1 批量视频探测互斥（避免并发探测风暴）
+_VIDEO_PROBE_WORKERS = 8                  # 并发 ffprobe 进程上限
+_VIDEO_PROBE_BUDGET_SEC = 3.0             # 单次 meta=1 的视频探测总预算，到点立即返回
+
+# 分类集合固定为：video/audio/image/text/code/archive/exe/lnk/other（+dir 目录）
+_AUDIO_EXT = {"mp3", "wav", "flac", "aac", "m4a", "wma", "ape", "opus",
+              "mid", "midi", "aiff", "aif", "au"}
+_IMAGE_EXT = {"jpg", "jpeg", "png", "gif", "bmp", "webp", "svg", "ico",
+              "tif", "tiff", "heic", "heif", "avif", "jfif"}
+_CODE_EXT = {"js", "ts", "jsx", "tsx", "py", "java", "c", "cpp", "h", "hpp",
+             "cs", "go", "rs", "php", "rb", "sh", "ps1", "html", "htm", "css",
+             "scss", "xml", "yaml", "yml", "toml", "sql", "json"}
+_PLAIN_TEXT_EXT = {"txt", "log", "md", "markdown", "csv", "ini", "conf", "cfg",
+                   "env", "srt", "sub", "vtt", "nfo", "rtf", "pdf"}
+_ARCHIVE_KIND_EXT = {"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst",
+                     "cab", "jar", "iso"}
+_EXE_EXT = {"exe", "msi", "apk", "com", "scr", "bat", "cmd"}
+_MIME_BY_EXT = {
+    # image
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif",
+    "webp": "image/webp", "bmp": "image/bmp", "svg": "image/svg+xml", "ico": "image/x-icon",
+    "tif": "image/tiff", "tiff": "image/tiff", "heic": "image/heic", "avif": "image/avif",
+    # audio
+    "mp3": "audio/mpeg", "wav": "audio/wav", "flac": "audio/flac", "aac": "audio/aac",
+    "m4a": "audio/mp4", "wma": "audio/x-ms-wma", "opus": "audio/opus",
+    "mid": "audio/midi", "midi": "audio/midi",
+    # text / 文档
+    "txt": "text/plain", "log": "text/plain", "md": "text/markdown", "markdown": "text/markdown",
+    "csv": "text/csv", "rtf": "application/rtf", "pdf": "application/pdf",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    # code
+    "json": "application/json", "xml": "application/xml", "html": "text/html", "htm": "text/html",
+    "css": "text/css", "js": "application/javascript", "ts": "application/typescript",
+    "py": "text/x-python", "java": "text/x-java-source", "sh": "application/x-sh",
+    "sql": "application/sql", "yaml": "application/yaml", "yml": "application/yaml",
+    # archive
+    "zip": "application/zip", "rar": "application/vnd.rar", "7z": "application/x-7z-compressed",
+    "tar": "application/x-tar", "gz": "application/gzip", "bz2": "application/x-bzip2",
+    "xz": "application/x-xz", "zst": "application/zstd", "cab": "application/vnd.ms-cab-compressed",
+    "jar": "application/java-archive", "iso": "application/x-iso9660-image",
+    # exe / lnk
+    "exe": "application/x-msdownload", "msi": "application/x-msi",
+    "apk": "application/vnd.android.package-archive",
+    "lnk": "application/x-ms-shortcut",
+}
+
+
+def _meta_kind(ext):
+    """扩展名 → (分类, mime)。分类集合固定为 video/audio/image/text/code/archive/exe/lnk/other。
+    按优先级逐一匹配，避免交集扩展名（如 ogg 归 video、svg 归 image）重复归类。"""
+    if ext in _VIDEO_EXT:
+        return "video", _VIDEO_EXT[ext]
+    if ext in _AUDIO_EXT:
+        return "audio", _MIME_BY_EXT.get(ext)
+    if ext in _IMAGE_EXT:
+        return "image", _MIME_BY_EXT.get(ext)
+    if ext in _ARCHIVE_KIND_EXT:
+        return "archive", _MIME_BY_EXT.get(ext)
+    if ext in _LNK_EXT:
+        return "lnk", _MIME_BY_EXT.get(ext)
+    if ext in _EXE_EXT:
+        return "exe", _MIME_BY_EXT.get(ext)
+    if ext in _CODE_EXT:
+        return "code", _MIME_BY_EXT.get(ext)
+    if ext in _PLAIN_TEXT_EXT:
+        return "text", _MIME_BY_EXT.get(ext)
+    return "other", None
+
+
+def _video_meta_cached(path):
+    """meta=1 专用：仅从 _video_details_cache 读视频元数据，未命中返回 None。
+    绝不运行 ffprobe，保证列表读取零阻塞；探测由 _probe_video_meta 后台负责。"""
+    try:
+        st = os.stat(path)
+        ck = (os.path.realpath(path), st.st_size, int(st.st_mtime))
+    except OSError:
+        return None
+    d = _video_details_cache.get(ck)
+    if not d:
+        return None
+    out = {}
+    if d.get("duration_sec"):
+        out["duration"] = d["duration_sec"]
+    res = d.get("resolution")
+    if res:
+        try:
+            w, h = str(res).split("x", 1)
+            out["width"], out["height"] = int(w), int(h)
+        except (ValueError, AttributeError):
+            pass
+    return out or None
+
+
+def _probe_video_meta(paths):
+    """meta=1 专用：并发探测未命中缓存的视频（ffprobe），预算内等待、到点立即返回。
+    失败静默跳过（_video_details 内部已兜底）；预算后未完成任务由 executor 后台线程
+    继续执行、成功后写入进程内缓存，后续 meta=1 请求直接命中。多请求并发时互斥跳过，
+    绝不重复探测、绝不阻塞列表。"""
+    if not paths:
+        return
+    if not _VIDEO_PROBE_LOCK.acquire(blocking=False):
+        return  # 已有探测在进行：本次只返回缓存结果，列表不阻塞
+    try:
+        ex = ThreadPoolExecutor(max_workers=_VIDEO_PROBE_WORKERS)
+        try:
+            futs = [ex.submit(_video_details, p) for p in paths]
+            deadline = time.monotonic() + _VIDEO_PROBE_BUDGET_SEC
+            for f in futs:
+                try:
+                    f.result(timeout=max(0.0, deadline - time.monotonic()))
+                except Exception:  # noqa: BLE001  超时/ffprobe 失败一律静默
+                    pass
+        finally:
+            ex.shutdown(wait=False)  # 未完成任务由后台线程继续 → 写缓存
+    finally:
+        _VIDEO_PROBE_LOCK.release()
+
+
+def _augment_entries_meta(entries, real_map=None):
+    """api/list?meta=1：给每个 entry 附加 meta 字段（供前端侧边栏搜索/筛选/排序）。
+
+    * 目录：{"kind": "dir"}
+    * 文件：{"kind": 分类, "mime": 类型}，kind ∈ {video/audio/image/text/code/archive/exe/lnk/other}
+    * 视频额外附 duration（秒）/width/height：优先读进程内缓存（零 IO），
+      未命中进探测队列由 _probe_video_meta 并发探测（预算内快速失败，绝不阻塞列表）。
+    文本/代码文件无需读内容，仅按扩展名给出类型标识。
+    real_map：虚拟分享用（entry["path"] → 真实路径），缺省直接用 entry["path"]。
+    """
+    videos = []
+    for e in entries:
+        if e["is_dir"]:
+            e["meta"] = {"kind": "dir"}
+            continue
+        real = (real_map or {}).get(e["path"], e["path"])
+        ext = os.path.splitext(e["name"])[1].lstrip(".").lower()
+        kind, mime = _meta_kind(ext)
+        meta = {"kind": kind}
+        if mime:
+            meta["mime"] = mime
+        if kind == "video":
+            v = _video_meta_cached(real)
+            if v:
+                meta.update(v)
+            else:
+                videos.append(real)
+        e["meta"] = meta
+    if videos:
+        _probe_video_meta(videos)
+    return entries
 
 
 def _detect_bom(raw):
