@@ -1563,7 +1563,7 @@ $("viewBtn").onclick = () => {
   $("viewBtn").textContent = view === "list" ? "▦" : "☰";
   $("viewBtn").title = view === "list" ? "切换为网格视图" : "切换为列表视图";
   if (!SHARE_MODE) { try { localStorage.setItem("drive.view", view); } catch (e) { /* 忽略 */ } }
-  if (cur) loadList(cur);
+  if (cur !== null) loadList(cur);
 };
 
 async function loadList(path, opts) {
@@ -1576,8 +1576,12 @@ async function loadList(path, opts) {
     rows.innerHTML = "";
     showAlert(data.error, [
       { label: "↩ 返回上级", fn: () => {
+          // 回退链：后端合法 parent → 导航栈栈顶（打开 .lnk 前的页面，含虚拟分享根 ""）→ 当前根
+          // 越界错误响应不含 parent，且虚拟分享根 activeRoot 为空串，必须靠 cur/navStack 兜底
           const parent = data.parent;
-          if (parent) loadList(parent); else if (activeRoot) loadList(activeRoot);
+          if (parent) loadList(parent);
+          else if (navStack[navIdx] !== undefined) loadList(navStack[navIdx], { push: false });
+          else if (activeRoot !== null) loadList(activeRoot);
         } },
       { label: "↻ 重试", fn: () => loadList(path) },
     ]);
@@ -1730,7 +1734,7 @@ function bindRowAction(el, e, locked) {
   }
 }
 
-$("refreshBtn").onclick = () => { if (cur) loadList(cur); };
+$("refreshBtn").onclick = () => { if (cur !== null) loadList(cur); };
 
 $("packBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }
