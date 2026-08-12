@@ -22,6 +22,7 @@ import ctypes
 import datetime
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
@@ -1298,6 +1299,31 @@ class _DriveHandler(BaseHTTPRequestHandler):
             except OSError as exc:
                 errors.append({"name": name, "error": str(exc)})
         self._send_json({"saved": saved, "errors": errors, "dir": target})
+
+    def handle_one_request(self):  # noqa: D401
+        # HTTP 明文端口（8444）若收到 TLS ClientHello（客户端误用 https:// 访问
+        # http 端口、或浏览器自动升级 HTTPS），标准解析会把二进制当请求行，
+        # 刷出大量 400 乱码日志。这里识别 TLS 记录头后返回友好提示并关闭连接。
+        try:
+            head = self.rfile.peek(2)
+        except Exception:  # noqa: BLE001
+            head = b""
+        if head[:2] == b"\x16\x03":
+            self.close_connection = True
+            body = ("这是 HTTP 明文端口（免证书），请使用 http:// 访问；"
+                    "TLS 加密请访问 8443 端口。").encode("utf-8")
+            self.requestline = "TLS handshake to HTTP port"  # 供 log_request 使用
+            self.request_version = "HTTP/1.1"
+            self.command = "TLS"
+            self.send_response(400, "TLS handshake sent to HTTP plaintext port")
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(body)
+            self.log_message("TLS handshake sent to HTTP plaintext port, ignored")
+            return
+        super().handle_one_request()
 
     def log_message(self, fmt, *args):  # noqa: A003
         sys.stderr.write("[drive] %s\n" % (fmt % args))
@@ -3248,12 +3274,58 @@ def _stream_archive_virtual(handler, virtual_items):
             pass
 
 
+_CERT_CN = "transfer.local"
+
+
+def _cert_san():
+    """证书 SAN：DNS 名 + 本机全部可访问 IP（回环/局域网/虚拟网卡/公网 IPv6）。
+
+    浏览器按 IP 访问 https 时只会做 SAN 中的 IP 匹配，若 SAN 缺 IP 会报
+    "主机名不匹配"（不可绕过）。因此证书必须把本机所有 IP 都写进 SAN。
+    """
+    san = [x509.DNSName(_CERT_CN)]
+    ips = ["127.0.0.1", "::1"]
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    for ip in _public_ipv6():
+        if ip not in ips:
+            ips.append(ip)
+    for ip in ips:
+        san.append(x509.IPAddress(ipaddress.ip_address(ip)))
+    return san
+
+
+def _cert_needs_rebuild() -> bool:
+    """证书缺失/损坏/已过期/SAN 不含 IP 时都需要重新生成。
+
+    旧证书 SAN 只有 DNS 名没有 IP，按 IP 访问会主机名不匹配而无法使用；
+    检测到这类证书应自动重建，否则旧证书会一直卡住 https。
+    """
+    try:
+        with open(CERT_FILE, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+    except Exception:  # noqa: BLE001
+        return True
+    if cert.not_valid_after_utc <= datetime.datetime.now(datetime.timezone.utc):
+        return True
+    try:
+        san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    except x509.ExtensionNotFound:
+        return True
+    return not any(isinstance(item, x509.IPAddress) for item in san)
+
+
 def _ensure_cert() -> None:
-    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
+    if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE) and not _cert_needs_rebuild():
         return
     os.makedirs(CERT_DIR, exist_ok=True)
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "drive.local")])
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _CERT_CN)])
     now = datetime.datetime.now(datetime.timezone.utc)
     cert = (
         x509.CertificateBuilder()
@@ -3264,7 +3336,7 @@ def _ensure_cert() -> None:
         .not_valid_before(now - datetime.timedelta(minutes=5))
         .not_valid_after(now + datetime.timedelta(days=7))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName("drive.local")]),
+            x509.SubjectAlternativeName(_cert_san()),
             critical=False,
         )
         .sign(key, hashes.SHA256())
@@ -3293,7 +3365,7 @@ def _cert_p12_bytes() -> bytes:
     with open(CERT_FILE, "rb") as fh:
         cert = x509.load_pem_x509_certificate(fh.read())
     return pkcs12.serialize_key_and_certificates(
-        name=b"drive.local",
+        name=_CERT_CN.encode(),
         key=key,
         cert=cert,
         cas=None,
