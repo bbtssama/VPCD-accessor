@@ -2211,10 +2211,6 @@ async function api(ep, opt) {
   return r.json();
 }
 
-function setPackBtn() {
-  // 打包按钮文案已静态化在 index.html（打包中心面板），无运行时写入
-}
-
 function hideMainUi() {
   if ($("packGroup")) $("packGroup").classList.add("d-none");
   if ($("uploadBtn")) $("uploadBtn").classList.add("d-none");
@@ -2255,7 +2251,6 @@ async function init() {
   pinned = info.pinned || [];
   infoUrls = Array.isArray(info.urls) ? info.urls : [];
   infoUrlsHttp = Array.isArray(info.urls_http) ? info.urls_http : [];
-  setPackBtn();
   renderDriveTabs();
   renderPinned();
   // ---- 恢复视图模式与上次目录（功能 2：刷新不丢状态） ----
@@ -2314,6 +2309,8 @@ async function switchDrive(root) {
 
 function renderPinned() {
   const box = $("pinnedList");
+  // 置顶非空时才显示「全部清空」（任何提前 return 之前先同步显隐）
+  $("clearPinBtn").classList.toggle("d-none", !pinned.length);
   // 折叠头文案：N 项 + 非目录项大小总和（有目录时补"含目录"）
   const n = pinned.length;
   let total = 0, hasDir = false;
@@ -3391,22 +3388,24 @@ function copyDirectDl(id) {
 }
 
 // 任务状态 → 进度/文案（含压缩中当前文件与下载进度）
+// 说明：打包中 pct 以字节比为准（cap 99），字节未动（0）时兜底用文件数比 min(99, 100*file_done/file_total)
 function taskStateUI(t) {
   const s = t.state;
-  if (s === "queued") return { pct: 0, label: "排队中…", striped: true, detail: "" };
-  if (s === "scanning") return { pct: 0, label: "扫描中…", striped: true, detail: "" };
+  if (s === "queued") return { pct: 0, label: "排队中…", striped: true, idle: true, detail: "" };
+  if (s === "scanning") return { pct: 0, label: "扫描中…", striped: true, idle: true, detail: "" };
   if (s === "compressing") {
-    const pct = t.total_bytes > 0 ? Math.min(99, Math.round(t.done_bytes / t.total_bytes * 100)) : 0;
-    return { pct, label: "压缩中 " + pct + "%", striped: true,
+    let pct = t.total_bytes > 0 ? Math.min(99, Math.round(t.done_bytes / t.total_bytes * 100)) : 0;
+    if (pct === 0 && t.file_total > 0) pct = Math.min(99, Math.round(100 * (t.file_done || 0) / t.file_total));
+    return { pct, label: "打包中 " + pct + "%", striped: true,
              detail: t.current_file ? "当前文件: " + esc(t.current_file) : "" };
   }
-  if (s === "ready") return { pct: 100, label: "压缩完成", striped: false,
+  if (s === "ready") return { pct: 100, label: "压缩完成 · 待下载", striped: false,
                               detail: "zip 大小 " + fmtSize(t.dl_total_bytes) };
   if (s === "downloading") {
     const pct = t.dl_total_bytes > 0 ? Math.round(t.bytes_sent / t.dl_total_bytes * 100) : 0;
     return { pct, label: "下载中 " + pct + "%", striped: true, detail: "" };
   }
-  if (s === "done") return { pct: 100, label: "✓ 已下载", striped: false, detail: "" };
+  if (s === "done") return { pct: 100, label: "✓ 已完成", striped: false, detail: "" };
   if (s === "failed") return { pct: 0, label: "打包失败", striped: false, detail: esc(t.error || "") };
   if (s === "aborted") return { pct: 0, label: "已取消", striped: false, detail: "" };
   return { pct: 0, label: esc(s), striped: false, detail: "" };
@@ -3428,7 +3427,7 @@ function renderTask(t) {
           '<button class="btn btn-outline-secondary btn-sm py-0 px-1 flex-shrink-0" title="删除任务" ' +
               'onclick="removeTask(\'' + t.task_id + '\')">✕</button>' +
           "</div>";
-  card += '<div class="progress" style="height:6px" role="progressbar" aria-valuenow="' + st.pct + '" aria-valuemin="0" aria-valuemax="100">' +
+  card += '<div class="progress' + (st.idle ? " pk-idle-track" : "") + '" style="height:6px" role="progressbar" aria-valuenow="' + st.pct + '" aria-valuemin="0" aria-valuemax="100">' +
           '<div class="progress-bar' + (st.striped ? " progress-bar-striped progress-bar-animated" : "") +
           '" style="width:' + st.pct + '%"></div></div>';
   if (t.state === "ready" || t.state === "done") {
@@ -3487,23 +3486,60 @@ function removeTask(id) {
     .catch(() => { /* 静默 */ });
 }
 
-// 顶部总进度 = 非终态任务字节加权，迷你条/摘要同步
+// 顶部总进度（按任务加权，一次性产出全部头部/迷你条状态）
+// 规则：done=1、ready/downloading=0.99、compressing=0.99*字节比（cap）、failed/aborted=0.99、
+// queued/scanning=0，故 totalPct=100 当且仅当全部任务 done；无任务时整块隐藏
 function updateTotal() {
-  const all = Object.keys(archTasks).map(k => archTasks[k]);
-  const active = all.filter(t => archFinalStates.indexOf(t.state) < 0);
-  let sumDone = 0, sumTotal = 0;
-  active.forEach(t => { sumDone += t.done_bytes || 0; sumTotal += t.total_bytes || 0; });
-  const pct = sumTotal > 0 ? Math.round(sumDone / sumTotal * 100) : 0;
-  const n = all.length;
-  $("packSummary").textContent = n + " 任务 · " + pct + "%";
-  $("packSummary").classList.toggle("d-none", n === 0);
-  $("packTotalBar").style.width = pct + "%";
+  const tasks = Object.values(archTasks);
+  const total = tasks.length;
+  const done = tasks.filter(t => t.state === "done").length;
+  const active = { scan: tasks.filter(t => t.state === "scanning" || t.state === "queued").length,
+                   pack: tasks.filter(t => t.state === "compressing").length,
+                   dl: tasks.filter(t => t.state === "downloading").length,
+                   wait: tasks.filter(t => t.state === "ready").length };
+  let sum = 0;
+  for (const t of tasks) {
+    const s = t.state;
+    if (s === "done") sum += 1;
+    else if (s === "compressing" && t.total_bytes > 0) sum += 0.99 * Math.min(1, t.done_bytes / t.total_bytes);
+    else if (s === "queued" || s === "scanning") sum += 0;
+    else if (s === "ready" || s === "downloading") sum += 0.99;
+    else if (s === "failed" || s === "aborted") sum += 0.99;
+  }
+  const totalPct = total ? Math.floor(100 * sum / total) : 0;
+  // 头部芯片（任务完成数）
+  const chip = $("packDone"), sum2 = $("packSummary");
+  if (chip) {
+    if (!total) chip.classList.add("d-none");
+    else {
+      chip.classList.remove("d-none");
+      let txt = "任务完成 " + done + "/" + total;
+      const bad = tasks.filter(t => t.state === "failed").length;
+      const canc = tasks.filter(t => t.state === "aborted").length;
+      if (bad) txt += " · 失败 " + bad;
+      if (canc) txt += " · 取消 " + canc;
+      chip.textContent = txt;
+    }
+  }
+  if (sum2) {
+    const parts = [];
+    if (active.pack) parts.push("打包中 " + active.pack);
+    if (active.dl) parts.push("下载中 " + active.dl);
+    if (active.wait) parts.push("待下载 " + active.wait);
+    if (active.scan) parts.push("扫描/排队 " + active.scan);
+    sum2.textContent = parts.join(" · ");
+    sum2.classList.toggle("d-none", !parts.length);
+  }
+  const bar = $("packTotalBar");
+  if (bar) { bar.style.width = totalPct + "%"; bar.parentElement.classList.toggle("d-none", total === 0); }
+  // 迷你条：仅 活动任务存在 且 面板关闭 才显示（修掉原先 n>0 即弹的老 bug）
   const mini = $("packMiniBar");
-  if (n > 0 && $("packPanel").classList.contains("d-none")) {
-    mini.textContent = "📦 " + n + " 任务 · " + pct + "%";
-    mini.classList.remove("d-none");
-  } else if (n === 0) {
-    mini.classList.add("d-none");
+  const hasActive = tasks.some(t => ["queued", "scanning", "compressing", "ready", "downloading"].indexOf(t.state) >= 0);
+  if (mini) {
+    const panel = $("packPanel");
+    const show = hasActive && panel && panel.classList.contains("d-none");
+    mini.classList.toggle("d-none", !show);
+    if (show) mini.textContent = "📦 " + totalPct + "% · 完成 " + done + "/" + total;
   }
 }
 
@@ -3511,8 +3547,9 @@ function updateTotal() {
 function createPackPreview() {
   const box = $("packPreviewTree");
   if (!box) return;
-  $("packNewLabel").textContent = "将打包置顶的 " + pinned.length + " 项";
-  $("packNewLabel").classList.toggle("d-none", !pinned.length);
+  $("packNewLabel").textContent = pinned.length
+    ? "将打包置顶的 " + pinned.length + " 项"
+    : "还没有置顶文件，先在文件列表点亮 ★";
   if (!pinned.length) { box.innerHTML = ""; return; }
   box.innerHTML = pinned.map(p => {
     return '<div class="pk-prow d-flex align-items-center gap-2"' +
@@ -3569,11 +3606,8 @@ async function submitPack() {
   } catch (e) { toast("提交失败: " + (e && e.message || e)); }
 }
 
-// 打开打包中心（不阻塞不 disabled：随时可点，观众可继续浏览）
-$("packBtn").onclick = () => {
-  if (!pinned.length) { toast("还没有置顶文件"); return; }
-  openPanel();
-};
+// 打开打包中心（不论有无置顶均可打开：可看历史任务/提交区引导；后台任务不阻塞浏览）
+$("packBtn").onclick = () => { openPanel(); };
 
 $("packSubmitBtn").onclick = submitPack;
 
@@ -3609,6 +3643,17 @@ if (!SHARE_MODE) {
 $("shareAllBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }
   showShareManyDialog();
+};
+
+// 一键清空置顶：后端 clear=1 原地清 list，前端同步 pinned 并刷新列表/预览树
+$("clearPinBtn").onclick = async () => {
+  if (!pinned.length) return;
+  const j = await api("api/pin?clear=1");
+  pinned = (j || {}).pinned || [];
+  renderPinned();
+  loadList(cur);
+  if (!$("packPanel").classList.contains("d-none")) createPackPreview();
+  toast("已清空全部置顶");
 };
 
 $("uploadBtn").onclick = () => $("fileInput").click();

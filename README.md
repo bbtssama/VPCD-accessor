@@ -159,7 +159,7 @@
 | GET | `/static/<name>` | - | 离线静态资源（白名单，见第 10 节） |
 | GET | `/api/info` | - | `{roots, pinned, archive_format, urls, urls_http}`：`urls`/`urls_http` 为本机全部可访问地址数组（http 免证书版用于局域网/本机直连，元素形如 `http://<ip>:<port>/<token>/`；不含回环 127.0.0.1 的地址也可供直连下载选址，见第 7.4 节；`_urls` `server.py:4167` / `_urls_http` `server.py:4174`） |
 | GET | `/api/list` | `path`、`meta=1` | 目录列表 `{path, parent, entries[]}`；`meta=1` 给每个 entry 附加 `meta`（kind/mime、视频 duration/width/height + title/author/type/tags/notes，见第 5.4 节）；无权限 403 + parent 供"返回上级" |
-| GET | `/api/pin` | `path`、`add=1\|0` | 置顶/取消置顶，返回最新 pinned 列表 |
+| GET | `/api/pin` | `path`、`add=1\|0`、`clear=1` | 置顶/取消置顶/一键清空（`clear=1` 免 path 原地清 list），返回最新 pinned 列表 |
 | GET | `/api/stat` | `path` | 文件/目录详情（含 preview 类型、视频 details、locked） |
 | GET | `/api/vmeta` | `path` | 视频结构化元数据（`{ok, meta}`，非视频 meta=null 不报错） |
 | GET | `/api/lnk` | `path` | PowerShell COM 解析 .lnk 目标（`{ok,target,is_dir,exists,...}`） |
@@ -222,8 +222,8 @@
 | 磁盘标签页 | 顶部横向滚动胶囊按钮，点击切换磁盘根 | `renderDriveTabs` `app.js:2295` |
 | 面包屑 + 后退/前进 | 分段导航；栈式前进后退（`_pushNav` `app.js:2409`，按钮 `app.js:2420-2421`） | `renderBreadcrumb` `app.js:2341` |
 | 列表/网格视图 | 网格视图视频显示 ffmpeg 缩略图封面（失败回退图标）；视图偏好持久化 | `listItem` `app.js:3118` / `gridItem` `app.js:3154` |
-| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消与「📦 打包」按钮（打开打包中心面板）；**置顶卡头部可点击折叠**（默认切目录即收起，chevron ▲/▼ 同步，`index.html:205-226`），折叠头实时标题「📌 置顶文件 · N 项 · 共 X」；打包按钮不再 disabled（后台任务，随时可点） | `renderPinned` `app.js:2313`、`pinnedHead` 折叠 `app.js:2348-2352` |
-| 打包中心面板 | 右下角悬浮面板（`index.html:252-278`，CSS `index.html:155-179`）：任务列表每 1s 轮询重建（`pollArchives` `app.js:3297`，`document.hidden` 暂停、回前台立即刷新）；任务卡含状态机文案/阶段性进度条/跳过清单展开（`renderTask` `app.js:3356`）、✕ 删除（活任务先本地置取消态再 POST，`removeTask` `app.js:3410`）、ready/done 显示「⬇ 下载」**原生下载**（`location.href = /api/archive/dl?id=`，无 Blob）；提交区：压缩级别单选 + 置顶项预览树（目录 ▶ 拉 `child_count/child_bytes` 行内统计，不递归，`createPackPreview` `app.js:3444`）+「＋ 提交打包」（`submitPack` `app.js:3488`）；顶部总进度=非终态字节加权（`updateTotal` `app.js:3424`）；迷你条/面板互斥（头部点击折叠露头） | 见第 7.4 节 |
+| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消、「全部清空」（有置顶时显示，`clearPinBtn`，一键 `api/pin?clear=1`）与「📦 打包」按钮（打开打包中心面板）；**置顶卡头部可点击折叠**（默认切目录即收起，chevron ▲/▼ 同步，`index.html:205-226`），折叠头实时标题「📌 置顶文件 · N 项 · 共 X」；打包按钮不再 disabled（后台任务，随时可点） | `renderPinned` `app.js:2310`、`pinnedHead` 折叠 `app.js:2348-2352` |
+| 打包中心面板 | 右下角悬浮面板（`index.html:256-278`，CSS `index.html:154-183`）：任务列表每 1s 轮询重建（`pollArchives` `app.js:3301`，`document.hidden` 暂停、回前台立即刷新）；任务卡含状态机文案/阶段性进度条（排队/扫描为轨道条纹动画，压缩中显示「当前文件」与文件比兜底，就绪显示 zip 大小）/跳过清单展开（`renderTask` `app.js:3415`）、✕ 删除（活任务先本地置取消态再 POST，`removeTask` `app.js:3476`）、ready/done 显示「⬇ 下载」**原生下载**（`location.href = /api/archive/dl?id=`，无 Blob）；提交区：压缩级别单选 + 置顶项预览树（目录 ▶ 拉 `child_count/child_bytes` 行内统计，不递归，`createPackPreview` `app.js:3547`；无置顶时引导「先在文件列表点亮 ★」）+「＋ 提交打包」（`submitPack` `app.js:3592`）；面板头：任务完成 `x/y` 芯片（失败/取消计数）+ 活动摘要（打包中/下载中/待下载/扫描排队，窄屏隐藏）+ 总进度条（任务加权：done=1、其余非终态 ≤0.99，**100% ⟺ 全部完成**，`updateTotal` `app.js:3492`）；迷你条仅「有活动任务且面板关闭」时显示（修掉原先 n>0 即弹的 bug）；迷你条/面板互斥（头部点击折叠露头） | 见第 7.4 节 |
 | 上传 | 多文件顺序上传 + 进度条；分享模式无此按钮 | `app.js:3353-3385` |
 | 下载 | 非预览类型直接跳 `/dl`；统一 `dlUrl()`（`app.js:908`） | `bindRowAction` `app.js:3209` |
 | 视频播放器 | 画质选择（原画/高清/标清/低清）、**MSE 免证书模式**、缓存下载开关、字幕（track/overlay）、ASR 识别（语言切换）、进度条悬停预览（缩略图条 + 单帧 80ms 防抖）、视频详情面板（标题/作者/类型/统计/标签/技术徽章）、原画→高清自动降级 | `showVideo` `app.js:1164` |
@@ -293,7 +293,11 @@
 - **原生下载**：`GET /api/archive/dl?id=`（`_archive_dl` `server.py:3960`）Content-Length + `Content-Disposition: attachment; filename*=UTF-8''打包下载_<ts>.zip`，前端 `location.href` 直链（无 Blob 不占内存）；每 4MB 更新 `bytes_sent` 供下载进度。
 - **大包直连**：`dl_total_bytes ≥ 200MB`（`DIRECT_DL_THRESHOLD` `app.js:3278`）的任务卡在「⬇ 下载」旁提示「⚠️ 经域名下载大包可能触发网关超时，建议直连」并给出「📋 复制直连下载链接」（`copyDirectDl` `app.js:3371`）——把任务 id 拼到直连地址 `<scheme>://<ip>:<port>/<token>/api/archive/dl?id=<task_id>` 上。直连地址来自 `/api/info` 的 `urls`/`urls_http`，前端选址规则（`pickDirectBase` `app.js:3342`）：**优先局域网可达**（私网 IPv4 10/8、172.16/12、192.168/16，或 ULA IPv6 fd/fc 开头），其次任意**非回环非链路本地**地址（公网 IPv6），排除 127.0.0.1/::1（手机/另一台设备上不可用）；旧后端无 `urls` 字段或列表为空时自动隐藏该区块（判空容错）。复制走 `navigator.clipboard`，自签名证书（非 secure context）下自动退化为 `execCommand('copy')`。
 - **置顶折叠**：置顶卡头部可点击折叠（CSS `.pinned-fold`，`index.html`），**默认切目录即收起**（`loadList` `app.js:3089-3114`），chevron ▲/▼ 同步，不持久化。
+- **置顶一键清空**：置顶卡右上「全部清空」（仅置顶非空时显示）→ `GET /api/pin?clear=1`（免 path，`server.py:1088-1092` 先于 resolve 原地清 list），前端同步 `pinned` 并刷新列表与打包预览树。
 - **预览统计**：`/api/archive/preview` 对目录返回 `child_count/child_bytes`（首层文件大小和），权限失败 `child_count=-1`；面板内"▶"点击拉取行内展示，不递归。
+- **总进度与面板头**（`updateTotal` `app.js:3492`）：总进度按**任务加权**而非字节求和——`done=1`，`ready/downloading/failed/aborted` 各 `0.99`，`compressing` 为 `0.99×字节比`（cap），`queued/scanning` 为 `0`，故 **总进度 100% ⟺ 全部任务完成**，其余时刻最多 99%；面板头为「任务完成 `x/y`」（失败/取消追加计数）+ 活动摘要（打包中 N / 下载中 N / 待下载 N / 扫描排队 N）+ 总进度条，无任务时整块隐藏。
+- **迷你条**（`packMiniBar`）：仅当**存在活动任务**（queued/scanning/compressing/ready/downloading）**且面板关闭**时显示（顺带修掉原先"只要有任务就弹"的 bug），文案「📦 N% · 完成 x/y」；打开面板即隐藏，关闭面板由 1s 轮询自动恢复接管。
+- **任务卡进度**（`taskStateUI` `app.js:3392`）：打包中 `pct=min(99, 字节比)`，字节比 0 时兜底 `min(99, 100×file_done/file_total)`（file_total>0 才行），card 显示「当前文件」；就绪态副文案「zip 大小 X」；排队/扫描为不确定态轨道条纹动画（CSS `.pk-idle-track`，`index.html`）。
 
 ## 8. 数据与状态
 

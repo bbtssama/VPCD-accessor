@@ -1085,6 +1085,11 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 "entries": entries,
             })
         elif route == "/api/pin":
+            # 一键清空全部置顶（无需 path，先于 resolve 处理）
+            if q.get("clear") == "1":
+                self.server.pinned[:] = []
+                self._send_json({"pinned": list(self.server.pinned)})
+                return
             p = self._resolve(q.get("path") or "")
             if p is None:
                 self._send_json({"error": "路径越界或不存在"}, 403)
