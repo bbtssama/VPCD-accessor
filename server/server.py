@@ -1306,6 +1306,10 @@ class _DriveHandler(BaseHTTPRequestHandler):
 class _DriveServer(ThreadingHTTPServer):
     address_family = socket.AF_INET6
     daemon_threads = True
+    # Windows 默认 SO_REUSEADDR 允许两个进程绑定同一端口，导致旧实例没退出时
+    # 新实例"静默启动成功"、请求随机分发到新旧两个进程。关闭复用让端口被占时
+    # bind 直接抛 OSError，新实例明确失败退出，避免多实例并存。
+    allow_reuse_address = False
 
     def __init__(self, addr, handler, roots, token):
         self.roots = roots
