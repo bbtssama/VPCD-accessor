@@ -65,7 +65,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(os.path.dirname(BASE_DIR), "static")
 _STATIC_ALLOWED = (
     "bootstrap.min.css", "bootstrap.bundle.min.js",
-    "app.js", "highlight.min.js", "highlight.min.css",
+    "app.js", "highlight.min.js", "highlight.min.css", "cjk-normalize.js",
 )
 
 # ffprobe 用于提取视频元数据（Windows 属性式标签）；缺失/失败时静默降级为 details=null

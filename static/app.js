@@ -1582,8 +1582,30 @@ function entryKindMatch(e, key) {
 function parseCustomExts() {
   return customExts.split(",").map(s => s.trim().replace(/^\.+/, "").toLowerCase()).filter(Boolean);
 }
-// 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(name includes)。
-// 独立抽函数便于后续扩展（元数据匹配、简繁归一化等）。
+// 搜索文本统一归一化：先 normalizeCJK 做简/繁/日式新字体归一，再转小写（英文大小写不敏感）。
+// normalizeCJK 对非汉字原样保留，可直接用于整串归一化；库未加载时退化为仅小写（搜索仍可用）。
+function normSearch(s) {
+  s = String(s == null ? "" : s);
+  if (typeof normalizeCJK === "function") s = normalizeCJK(s);
+  return s.toLowerCase();
+}
+// 收集 entry 可搜索文本：文件名 + meta 内所有字符串值（kind/mime/duration/width/height，
+// 以及视频 title/author/tags/notes 等——后端 meta 里有就匹配，没有就跳过）。
+function entrySearchText(e) {
+  const parts = [e.name];
+  const m = e.meta;
+  if (m && typeof m === "object") {
+    // 递归收集：普通字符串直接收；数组逐项；对象（如 tech:[{k,v}]、extra）取各属性值
+    const walk = v => {
+      if (typeof v === "string") parts.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === "object") Object.keys(v).forEach(k => walk(v[k]));
+    };
+    walk(m);
+  }
+  return parts.map(normSearch);
+}
+// 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(AND 多关键词，匹配文件名+meta 元信息)。
 function filterEntries(entries, query) {
   const types = [];
   document.querySelectorAll("#typeFilters input[type=checkbox]:checked").forEach(cb => {
@@ -1595,8 +1617,16 @@ function filterEntries(entries, query) {
     out = out.filter(e =>
       types.some(t => entryKindMatch(e, t)) || exts.some(x => extOf(e.name) === x));
   }
-  const q = String(query || "").trim().toLowerCase();
-  if (q) out = out.filter(e => String(e.name).toLowerCase().indexOf(q) >= 0);
+  const q = normSearch(query);
+  if (q) {
+    const terms = q.split(/\s+/).filter(Boolean); // 空格分词，多关键词 AND
+    if (terms.length) {
+      out = out.filter(e => {
+        const haystack = entrySearchText(e).join("\n");
+        return terms.every(t => haystack.indexOf(t) >= 0);
+      });
+    }
+  }
   return out;
 }
 // 排序（原地）：mtime 新→旧；name 本地化（目录排前，与后端默认一致）；size 大→小（目录排前）
@@ -1657,8 +1687,13 @@ document.addEventListener("keydown", e => { if (e.key === "Escape" && sidebarOpe
 // 视图切换（radio 式按钮组）
 $("viewListBtn").onclick = () => setView("list");
 $("viewGridBtn").onclick = () => setView("grid");
-// 搜索：input 实时过滤
-$("searchInput").addEventListener("input", () => { searchQuery = $("searchInput").value; renderEntries(); });
+// 搜索：input 实时过滤（防抖 150ms，避免大目录输入卡顿）
+let _searchDebounce = null;
+$("searchInput").addEventListener("input", () => {
+  searchQuery = $("searchInput").value;
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(renderEntries, 150);
+});
 // 类型多选（change 事件代理）
 $("typeFilters").addEventListener("change", ev => {
   if (ev.target.matches("input[type=checkbox]")) { syncTypeChips(); renderEntries(); }
