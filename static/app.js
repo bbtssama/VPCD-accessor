@@ -11,6 +11,12 @@ let shareRoot = null;
 let shareName = "";
 let shareExpires = null;
 let shareVirtual = false;
+// 侧边栏筛选/排序/搜索状态（不重新请求，基于 currentEntries 过滤重渲染）
+let currentEntries = [];   // 当前目录完整 entries（含 meta.kind），筛选/排序/搜索的数据源
+let sortBy = "mtime";      // mtime(新→旧) | name(本地化) | size(大→小)
+let searchQuery = "";      // 搜索关键词（匹配文件名）
+let customExts = "";       // 自输入后缀（逗号分隔，如 md,txt,json）
+let sidebarOpen = false;   // 侧边栏开合状态
 
 const $ = (id) => document.getElementById(id);
 
@@ -1376,8 +1382,7 @@ async function init() {
     activeRoot = shareVirtual ? "" : shareRoot;
     // 分享模式禁用 localStorage 恢复（不写也不读 drive.* 键），避免污染主页状态
     view = "list";
-    $("viewBtn").textContent = "▦";
-    $("viewBtn").title = "切换为网格视图";
+    syncViewBtns();
     let start = shareVirtual ? "" : shareRoot;
     try { start = new URLSearchParams(location.search).get("path") || start; } catch (e) { /* 忽略 */ }
     await loadList(start);
@@ -1392,8 +1397,7 @@ async function init() {
   renderPinned();
   // ---- 恢复视图模式与上次目录（功能 2：刷新不丢状态） ----
   view = loadLS("drive.view") === "grid" ? "grid" : "list";
-  $("viewBtn").textContent = view === "list" ? "▦" : "☰";
-  $("viewBtn").title = view === "list" ? "切换为网格视图" : "切换为列表视图";
+  syncViewBtns();
   const savedRoot = loadLS("drive.root");
   const savedCur = loadLS("drive.cur");
   if (roots.length) {
@@ -1558,21 +1562,132 @@ $("navFwd").onclick = () => { if (navIdx < navStack.length - 1) loadList(navStac
 
 // ---------------- 视图模式（list / grid），存 localStorage ----------------
 let view = "list";
-$("viewBtn").onclick = () => {
-  view = view === "list" ? "grid" : "list";
-  $("viewBtn").textContent = view === "list" ? "▦" : "☰";
-  $("viewBtn").title = view === "list" ? "切换为网格视图" : "切换为列表视图";
+
+// ---------------- 侧边栏：视图切换 / 类型筛选 / 排序 / 搜索 ----------------
+// 类型判定：基于 api/list?meta=1 返回的 meta.kind（video/text/code/exe/archive/lnk/dir）
+function entryKindMatch(e, key) {
+  const k = e.meta && e.meta.kind;
+  switch (key) {
+    case "video": return k === "video";
+    case "text": return k === "text";
+    case "code": return k === "code";
+    case "exe": return k === "exe";
+    case "archive": return k === "archive";
+    case "lnk": return k === "lnk";
+    case "dir": return !!e.is_dir;
+    default: return false;
+  }
+}
+// 自输入后缀解析：兼容带点/不带点、大小写、逗号分隔
+function parseCustomExts() {
+  return customExts.split(",").map(s => s.trim().replace(/^\.+/, "").toLowerCase()).filter(Boolean);
+}
+// 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(name includes)。
+// 独立抽函数便于后续扩展（元数据匹配、简繁归一化等）。
+function filterEntries(entries, query) {
+  const types = [];
+  document.querySelectorAll("#typeFilters input[type=checkbox]:checked").forEach(cb => {
+    types.push(cb.getAttribute("data-type"));
+  });
+  const exts = parseCustomExts();
+  let out = entries;
+  if (types.length || exts.length) {
+    out = out.filter(e =>
+      types.some(t => entryKindMatch(e, t)) || exts.some(x => extOf(e.name) === x));
+  }
+  const q = String(query || "").trim().toLowerCase();
+  if (q) out = out.filter(e => String(e.name).toLowerCase().indexOf(q) >= 0);
+  return out;
+}
+// 排序（原地）：mtime 新→旧；name 本地化（目录排前，与后端默认一致）；size 大→小（目录排前）
+function sortEntries(list) {
+  if (sortBy === "name") {
+    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) ||
+                        String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
+  } else if (sortBy === "size") {
+    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || ((b.size || 0) - (a.size || 0)));
+  } else {
+    list.sort((a, b) => (b.mtime || 0) - (a.mtime || 0));
+  }
+}
+// 统一渲染入口：从 currentEntries 过滤 → 排序 → 渲染（不再重新请求）
+function renderEntries() {
+  const rows = $("fileRows");
+  rows.classList.toggle("grid", view === "grid");
+  if (!currentEntries.length) { rows.innerHTML = '<div class="empty">空目录</div>'; return; }
+  const list = filterEntries(currentEntries, searchQuery);
+  sortEntries(list);
+  if (!list.length) { rows.innerHTML = '<div class="empty">无匹配项</div>'; return; }
+  rows.innerHTML = "";
+  list.forEach(e => rows.appendChild(view === "grid" ? gridItem(e) : listItem(e)));
+}
+function setView(v) {
+  if (view === v) return;
+  view = v;
   if (!SHARE_MODE) { try { localStorage.setItem("drive.view", view); } catch (e) { /* 忽略 */ } }
-  if (cur !== null) loadList(cur);
+  syncViewBtns();
+  renderEntries();
+}
+function syncViewBtns() {
+  $("viewListBtn").classList.toggle("active", view === "list");
+  $("viewGridBtn").classList.toggle("active", view === "grid");
+}
+function syncTypeChips() {
+  document.querySelectorAll("#typeFilters input[type=checkbox]").forEach(cb => {
+    const chip = cb.closest(".type-chip");
+    if (chip) chip.classList.toggle("active", cb.checked);
+  });
+}
+function openSidebar() {
+  sidebarOpen = true;
+  $("sidebar").classList.add("show");
+  $("sidebarMask").classList.add("show");
+}
+function closeSidebar() {
+  sidebarOpen = false;
+  $("sidebar").classList.remove("show");
+  $("sidebarMask").classList.remove("show");
+}
+function toggleSidebar() { sidebarOpen ? closeSidebar() : openSidebar(); }
+// 侧边栏打开/关闭（关闭不改变筛选状态，重开保留）
+$("viewBtn").onclick = toggleSidebar;
+$("sidebarClose").onclick = closeSidebar;
+$("sidebarMask").onclick = closeSidebar;
+document.addEventListener("keydown", e => { if (e.key === "Escape" && sidebarOpen) closeSidebar(); });
+// 视图切换（radio 式按钮组）
+$("viewListBtn").onclick = () => setView("list");
+$("viewGridBtn").onclick = () => setView("grid");
+// 搜索：input 实时过滤
+$("searchInput").addEventListener("input", () => { searchQuery = $("searchInput").value; renderEntries(); });
+// 类型多选（change 事件代理）
+$("typeFilters").addEventListener("change", ev => {
+  if (ev.target.matches("input[type=checkbox]")) { syncTypeChips(); renderEntries(); }
+});
+// 自输入后缀
+$("extInput").addEventListener("input", () => { customExts = $("extInput").value; renderEntries(); });
+// 排序
+$("sortSelect").addEventListener("change", () => { sortBy = $("sortSelect").value; renderEntries(); });
+// 一键重置筛选/排序/搜索
+$("resetFilterBtn").onclick = () => {
+  document.querySelectorAll("#typeFilters input[type=checkbox]").forEach(cb => { cb.checked = false; });
+  syncTypeChips();
+  $("extInput").value = ""; customExts = "";
+  $("searchInput").value = ""; searchQuery = "";
+  $("sortSelect").value = "mtime"; sortBy = "mtime";
+  renderEntries();
 };
+syncViewBtns();
+syncTypeChips();
 
 async function loadList(path, opts) {
   hideAlert();
   const rows = $("fileRows");
   rows.classList.toggle("grid", view === "grid");
   rows.innerHTML = '<div class="empty">加载中…</div>';
-  const data = await api("api/list?path=" + encodeURIComponent(path));
+  // meta=1：附带每个 entry 的 meta.kind，供侧边栏类型筛选/排序/搜索使用
+  const data = await api("api/list?path=" + encodeURIComponent(path) + "&meta=1");
   if (data.error) {
+    currentEntries = [];
     rows.innerHTML = "";
     showAlert(data.error, [
       { label: "↩ 返回上级", fn: () => {
@@ -1597,11 +1712,8 @@ async function loadList(path, opts) {
   }
   renderBreadcrumb();
   updateNavBtns();
-  if (!data.entries.length) { rows.innerHTML = '<div class="empty">空目录</div>'; return; }
-  rows.innerHTML = "";
-  data.entries.forEach(e => {
-    rows.appendChild(view === "grid" ? gridItem(e) : listItem(e));
-  });
+  currentEntries = data.entries;
+  renderEntries();
 }
 
 // 列表模式条目（点击行为与 grid 一致）
