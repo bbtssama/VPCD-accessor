@@ -149,6 +149,34 @@
   .tag-chip .score { font-size: 10px; opacity: .55; }
   .tag-chip.pulse { animation: tagPulse .25s ease; }
   @keyframes tagPulse { 0% { transform: scale(1); } 50% { transform: scale(1.18); } 100% { transform: scale(1); } }
+  /* 置顶列表折叠态（头部点击切换） */
+  .pinned-fold { display: none; }
+  /* ===== 打包中心面板（右下角悬浮，不遮罩不锁滚动） ===== */
+  .pack-panel { position: fixed; right: 12px; bottom: 12px; width: min(560px, calc(100vw - 24px));
+                max-height: min(78vh, 720px); display: flex; flex-direction: column; background: #fff;
+                border: 1px solid var(--bs-border-color); border-radius: 12px; z-index: 1030;
+                box-shadow: 0 12px 44px rgba(17,24,39,.22); overflow: hidden; }
+  .pack-panel.mini { transform: translateY(calc(100% - 46px)); transition: transform .18s ease; }
+  #packPanelHead { cursor: pointer; border-bottom: 1px solid var(--bs-border-color); user-select: none; }
+  .pack-total-wrap { height: 6px; border-radius: 3px; }
+  #packTasks { max-height: 42vh; overflow-y: auto; }
+  .pack-empty { text-align: center; color: var(--bs-secondary-color); font-size: 13px; padding: 18px 0; }
+  .pk-task { border: 1px solid var(--bs-border-color) !important; border-radius: 8px !important;
+             padding: 8px 10px !important; }
+  .pk-nm { min-width: 0; }
+  .pk-skiplist { max-height: 130px; overflow-y: auto; border-top: 1px dashed var(--bs-border-color);
+                 padding-top: 4px; word-break: break-all; }
+  .pk-prow { border-bottom: 1px dashed var(--bs-border-color); padding: 2px 0; }
+  .pk-prow:last-child { border-bottom: none; }
+  .pk-dir-btn { cursor: pointer; }
+  #packMiniBar { position: fixed; right: 12px; bottom: 12px; z-index: 1060; padding: 8px 14px;
+                 background: rgba(17,24,39,.92); color: #fff; border-radius: 999px; font-size: 13px;
+                 cursor: pointer; box-shadow: 0 6px 18px rgba(17,24,39,.25); }
+  @media (max-width: 575.98px) {
+    .pack-panel { left: 0; right: 0; bottom: 0; width: 100%; max-height: 85vh; border-radius: 14px 14px 0 0; }
+    #packMiniBar { right: 50%; transform: translateX(50%); }
+    #packTasks { max-height: 46vh; }
+  }
 </style>
 </head>
 <body class="bg-body-tertiary">
@@ -173,22 +201,19 @@
   <!-- 磁盘标签：一行横向可滚动胶囊按钮，手机上手指左右滑 -->
   <div id="driveTabs" class="d-flex overflow-x-auto gap-1 py-1 mb-2"></div>
 
-  <!-- 置顶文件卡片 -->
+  <!-- 置顶文件卡片（头部可点击折叠） -->
   <div id="pinnedCard" class="card shadow-sm mb-2">
     <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
-      <span class="fs-6 fw-semibold flex-shrink-0">⭐ 置顶文件</span>
+      <div class="d-flex align-items-center gap-2 flex-shrink-0" id="pinnedHead" role="button" title="展开/收起置顶文件">
+        <span class="fs-6 fw-semibold" id="pinnedHeadTitle">📌 置顶文件 · 0 项 · 共 —</span>
+        <span class="small text-muted" id="pinnedChevron">▼</span>
+      </div>
       <div class="d-flex align-items-center gap-2">
         <div class="btn-group flex-shrink-0" id="packGroup">
-          <button id="packBtn" class="btn btn-outline-primary btn-sm" title="把全部置顶项打包为 zip 下载">
+          <button id="packBtn" class="btn btn-outline-primary btn-sm" title="打开打包中心">
             <span class="d-none d-sm-inline">📦 打包 .zip 下载</span>
             <span class="d-inline d-sm-none">📦 打包</span>
           </button>
-          <button type="button" id="packMenuBtn" class="btn btn-outline-primary btn-sm dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="选择压缩级别"></button>
-          <ul class="dropdown-menu dropdown-menu-end">
-            <li><a class="dropdown-item" href="#" data-amode="store">⚡ 最快（不压缩）</a></li>
-            <li><a class="dropdown-item" href="#" data-amode="fast">🚀 快（低压缩）</a></li>
-            <li><a class="dropdown-item" href="#" data-amode="normal">📦 标准（默认）</a></li>
-          </ul>
         </div>
         <button id="shareAllBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
           <span class="d-none d-sm-inline">🔗 全部分享</span>
@@ -211,14 +236,6 @@
 
   <div id="alert" class="alert alert-danger py-2 mb-2 d-none"></div>
 
-  <!-- 打包进度条（含取消按钮；打包期间显示） -->
-  <div id="packWrap" class="d-none mb-2">
-    <div class="progress flex-grow-1" style="height:6px" role="progressbar" aria-label="打包进度">
-      <div id="packBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
-    </div>
-    <button id="packCancel" class="btn btn-outline-secondary btn-sm flex-shrink-0">取消</button>
-  </div>
-
   <!-- 上传进度条 -->
   <div class="progress d-none mb-2" style="height:4px" role="progressbar" aria-label="上传进度">
     <div id="upBar" class="progress-bar" style="width:0%"></div>
@@ -230,6 +247,33 @@
     <ul id="fileRows" class="list-group list-group-flush"></ul>
   </div>
 </main>
+
+<!-- 打包中心（后台任务面板：排队/进度/下载，右下角悬浮） -->
+<div id="packPanel" class="pack-panel d-none" aria-label="打包中心">
+  <div class="pack-head d-flex align-items-center gap-2 px-3 py-2" id="packPanelHead">
+    <span class="fw-semibold flex-shrink-0">📦 打包中心</span>
+    <span id="packSummary" class="badge text-bg-primary flex-shrink-0 d-none"></span>
+    <div class="progress flex-grow-1 pack-total-wrap"><div id="packTotalBar" class="progress-bar" style="width:0%"></div></div>
+    <button id="packPanelClose" class="btn-close flex-shrink-0" aria-label="关闭"></button>
+  </div>
+  <div id="packTasks" class="overflow-auto px-3 py-2"></div>
+  <div id="packNewTask" class="border-top px-3 py-2">
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+      <span class="small fw-semibold flex-grow-1" id="packNewLabel">将打包置顶的 0 项</span>
+      <div class="btn-group btn-group-sm" id="packModeGroup">
+        <button type="button" class="btn btn-outline-primary btn-sm px-2" data-amode="store" title="不压缩，最快">⚡不压缩</button>
+        <button type="button" class="btn btn-outline-primary btn-sm px-2" data-amode="fast" title="低压缩，快">🚀快</button>
+        <button type="button" class="btn btn-outline-primary btn-sm px-2 active" data-amode="normal" title="标准压缩">📦标准</button>
+      </div>
+      <button id="packSubmitBtn" class="btn btn-primary btn-sm">＋ 提交打包</button>
+    </div>
+    <div class="small text-muted mb-1">提示：压缩级别越高包越小但耗时越长；不压缩仅打包不做数据压缩，速度最快。</div>
+    <div id="packPreviewTree"></div>
+  </div>
+</div>
+
+<!-- 打包中心迷你条（面板折叠时右下角提示） -->
+<div id="packMiniBar" class="d-none">📦 打包中心</div>
 
 <!-- 轻量 toast -->
 <div id="toast" class="app-toast" role="status"></div>

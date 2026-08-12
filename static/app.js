@@ -2212,8 +2212,7 @@ async function api(ep, opt) {
 }
 
 function setPackBtn() {
-  $("packBtn").innerHTML = '<span class="d-none d-sm-inline">📦 打包 .zip 下载</span>' +
-                           '<span class="d-inline d-sm-none">📦 打包</span>';
+  // 打包按钮文案已静态化在 index.html（打包中心面板），无运行时写入
 }
 
 function hideMainUi() {
@@ -2221,6 +2220,8 @@ function hideMainUi() {
   if ($("uploadBtn")) $("uploadBtn").classList.add("d-none");
   if ($("driveTabs")) $("driveTabs").classList.add("d-none");
   if ($("pinnedCard")) $("pinnedCard").classList.add("d-none");
+  if ($("packPanel")) $("packPanel").classList.add("d-none");
+  if ($("packMiniBar")) $("packMiniBar").classList.add("d-none");
   const p = document.querySelector("main .progress");
   if (p) p.classList.add("d-none");
 }
@@ -2311,7 +2312,14 @@ async function switchDrive(root) {
 
 function renderPinned() {
   const box = $("pinnedList");
-  $("pinCount").textContent = pinned.length + " 个";
+  // 折叠头文案：N 项 + 非目录项大小总和（有目录时补"含目录"）
+  const n = pinned.length;
+  let total = 0, hasDir = false;
+  pinned.forEach(p => { if (p.is_dir) hasDir = true; else total += (p.size || 0); });
+  const sizeTxt = n ? fmtSize(total) + (hasDir ? " · 含目录" : "") : "—";
+  $("pinnedHeadTitle").textContent = "📌 置顶文件 · " + n + " 项 · 共 " + sizeTxt;
+  $("pinnedChevron").textContent = $("pinnedList").classList.contains("pinned-fold") ? "▶" : "▼";
+  $("pinCount").textContent = n + " 个";
   if (!pinned.length) { box.innerHTML = '<div class="empty" style="padding:14px 0">暂无置顶文件</div>'; return; }
   box.innerHTML = "";
   pinned.forEach(p => {
@@ -2335,6 +2343,13 @@ function renderPinned() {
     box.appendChild(row);
   });
 }
+
+// 置顶折叠头：点击展开/收起（chevron 同步）
+$("pinnedHead").onclick = () => {
+  const box = $("pinnedList");
+  const fold = box.classList.toggle("pinned-fold");
+  $("pinnedChevron").textContent = fold ? "▶" : "▼";
+};
 
 function renderBreadcrumb() {
   const bc = $("breadcrumb");
@@ -3110,6 +3125,11 @@ async function loadList(path, opts) {
   // 目录已切换/内容可能变化：使该目录标签缓存失效并重新扫描（侧边栏打开时可见渐出效果）
   _tagCache.delete(cur);
   startTagScan();
+  if (!SHARE_MODE) {
+    // 默设置顶列表为折叠态（切列表即收起，头部可点开）
+    $("pinnedList").classList.add("pinned-fold");
+    $("pinnedChevron").textContent = "▶";
+  }
 }
 
 // 列表模式条目（点击行为与 grid 一致）
@@ -3244,107 +3264,280 @@ function bindRowAction(el, e, locked) {
 
 $("refreshBtn").onclick = () => { if (cur !== null) loadList(cur); };
 
-// ---------------- 打包下载（fetch + Blob 流式：进度条 / 取消 / 失败清单） ----------------
-let packBusy = false;   // 打包进行中（防重复触发）
-let packAbort = null;   // 当前打包请求的 AbortController
+// ---------------- 打包中心（后台任务：排队 / 分块进度 / 原生下载 / 预览） ----------------
+let packMode = "normal";     // store | fast | normal（面板内单选）
+let archTasks = {};          // task_id -> 轻量任务快照（轮询重建/更新）
+const archFinalStates = ["ready", "done", "failed", "aborted"];
+let archPollTimer = null;    // 轮询定时器（页面隐藏时暂停）
 
-// 打包期间禁用主按钮与模式下拉，防止重复请求
-function setPackBusy(busy) {
-  $("packBtn").disabled = busy;
-  const m = $("packMenuBtn");
-  if (m) m.disabled = busy;
+function openPanel() {
+  $("packPanel").classList.remove("d-none");
+  $("packPanel").classList.remove("mini");
+  $("packMiniBar").classList.add("d-none");
+  createPackPreview();
+  pollArchives();            // 打开时立即刷一次
+  const nt = $("packNewTask");
+  if (nt && nt.scrollIntoView) nt.scrollIntoView({ block: "nearest" });  // 聚焦提交区
 }
 
-async function startPack(mode) {
-  if (packBusy) return;
-  packBusy = true;
-  packAbort = new AbortController();
-  setPackBusy(true);
-  const wrap = $("packWrap"), bar = $("packBar");
-  wrap.classList.remove("d-none");
-  wrap.classList.add("d-flex");
-  bar.style.width = "0%";
-  try {
-    const paths = pinned.map(p => p.path).join("|");
-    const r = await fetch(BASE + "dlzip?paths=" + encodeURIComponent(paths) +
-                          "&mode=" + encodeURIComponent(mode),
-                          { signal: packAbort.signal });
-    if (!r.ok) {
-      // 后端 400 时返回 JSON 错误（如"没有可打包的文件"/临时空间不足）
-      let msg = "打包失败（HTTP " + r.status + "）";
-      try { const j = await r.json(); if (j.error) msg = j.error; } catch (e) { /* 非 JSON 错误体 */ }
-      toast(msg);
-      return;
-    }
-    // 按 Content-Length 流式读 body，更新进度条
-    const total = parseInt(r.headers.get("Content-Length") || "0", 10);
-    const reader = r.body.getReader();
-    const chunks = [];
-    let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value && value.length) {
-        chunks.push(value);
-        got += value.length;
-      }
-      if (total > 0) bar.style.width = Math.min(100, Math.round(got / total * 100)) + "%";
-    }
-    // 失败清单：X-Archive-Skipped 头（URL 编码 JSON，可能被截断）+ 总数头
-    const sh = r.headers.get("X-Archive-Skipped");
-    const sc = parseInt(r.headers.get("X-Archive-Skipped-Count") || "0", 10);
-    if (sh || sc > 0) {
-      let list = [];
-      try { list = JSON.parse(decodeURIComponent(sh || "[]")); } catch (e) { /* 截断导致解析失败时仅显示计数 */ }
-      if (Array.isArray(list) && list.length) {
-        showAlert("以下 " + sc + " 个文件未打包成功：\n" +
-                  list.map(x => x.path + "（" + x.reason + "）").join("\n") +
-                  (sc > list.length ? "\n…其余 " + (sc - list.length) + " 项已省略" : ""),
-                  [{ label: "知道了", fn: hideAlert }]);
-      }
-    }
-    // 下载文件名取自服务端 Content-Disposition（中文名），缺省 archive.zip
-    let fname = "archive.zip";
-    const cd = r.headers.get("Content-Disposition") || "";
-    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
-    if (m) { try { fname = decodeURIComponent(m[1]); } catch (e) { /* 保持默认 */ } }
-    // Blob 下载并释放对象 URL
-    const blob = new Blob(chunks, { type: "application/octet-stream" });
-    const objUrl = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = objUrl;
-    a.download = fname;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
-  } catch (e) {
-    if (e && e.name === "AbortError") toast("已取消打包");
-    else toast("打包失败: " + (e && e.message || e));
-  } finally {
-    packBusy = false;
-    packAbort = null;
-    setPackBusy(false);
-    wrap.classList.remove("d-flex");
-    wrap.classList.add("d-none");
+function closePanel() {
+  $("packPanel").classList.add("d-none");
+  $("packPanel").classList.remove("mini");
+  updateTotal();             // 面板关闭后迷你条接管提示
+}
+
+// 迷你条与面板互斥：点了迷你条就展开面板；面板点头部折叠成露头
+function toggleMini() {
+  const p = $("packPanel");
+  if (p.classList.contains("d-none")) { openPanel(); return; }
+  p.classList.toggle("mini");
+  if (!p.classList.contains("mini")) createPackPreview();
+}
+
+function pollArchives() {
+  fetch(BASE + "api/archives")
+    .then(r => r.json())
+    .then(j => {
+      if (!j || !Array.isArray(j.tasks)) return;
+      const seen = {};
+      j.tasks.forEach(t => {
+        seen[t.task_id] = true;
+        if (archTasks[t.task_id]) archTasks[t.task_id] = Object.assign({}, archTasks[t.task_id], t);
+        else archTasks[t.task_id] = Object.assign({}, t);
+      });
+      // 服务端已逐出的任务同步移除（防止本地幽灵条目）
+      Object.keys(archTasks).forEach(k => { if (!seen[k]) delete archTasks[k]; });
+      renderArchPanel();
+    })
+    .catch(() => { /* 轮询失败静默（网络抖动不打扰） */ });
+}
+
+function startArchPolling() {
+  stopArchPolling();
+  archPollTimer = setInterval(pollArchives, 1000);
+}
+function stopArchPolling() {
+  if (archPollTimer) { clearInterval(archPollTimer); archPollTimer = null; }
+}
+
+function renderArchPanel() {
+  const box = $("packTasks");
+  if (!box) return;
+  const ids = Object.keys(archTasks).sort((a, b) => archTasks[b].created_at - archTasks[a].created_at);
+  box.innerHTML = ids.length
+    ? ids.map(id => renderTask(archTasks[id])).join("")
+    : '<div class="pack-empty">暂无打包任务</div>';
+  updateTotal();
+}
+
+// 任务状态 → 进度/文案（含压缩中当前文件与下载进度）
+function taskStateUI(t) {
+  const s = t.state;
+  if (s === "queued") return { pct: 0, label: "排队中…", striped: true, detail: "" };
+  if (s === "scanning") return { pct: 0, label: "扫描中…", striped: true, detail: "" };
+  if (s === "compressing") {
+    const pct = t.total_bytes > 0 ? Math.min(99, Math.round(t.done_bytes / t.total_bytes * 100)) : 0;
+    return { pct, label: "压缩中 " + pct + "%", striped: true,
+             detail: t.current_file ? "当前文件: " + esc(t.current_file) : "" };
+  }
+  if (s === "ready") return { pct: 100, label: "压缩完成", striped: false,
+                              detail: "zip 大小 " + fmtSize(t.dl_total_bytes) };
+  if (s === "downloading") {
+    const pct = t.dl_total_bytes > 0 ? Math.round(t.bytes_sent / t.dl_total_bytes * 100) : 0;
+    return { pct, label: "下载中 " + pct + "%", striped: true, detail: "" };
+  }
+  if (s === "done") return { pct: 100, label: "✓ 已下载", striped: false, detail: "" };
+  if (s === "failed") return { pct: 0, label: "打包失败", striped: false, detail: esc(t.error || "") };
+  if (s === "aborted") return { pct: 0, label: "已取消", striped: false, detail: "" };
+  return { pct: 0, label: esc(s), striped: false, detail: "" };
+}
+
+// 任务卡（每次轮询整卡重建，简单可靠）
+function renderTask(t) {
+  const modeLabel = { store: "⚡不压缩", fast: "🚀快", normal: "📦标准" }[t.mode] || "📦标准";
+  const st = taskStateUI(t);
+  const names = t.names || [];
+  const nameTxt = names.slice(0, 2).map(esc).join("、") +
+                  (names.length > 2 ? " 等 " + names.length + " 项" : "");
+  let card = '<div class="pk-task card card-body py-2 mb-2" data-id="' + esc(t.task_id) + '">';
+  card += '<div class="d-flex align-items-center gap-2 mb-1">' +
+          '<span class="flex-shrink-0">📦</span>' +
+          '<span class="pk-nm flex-grow-1 text-truncate" title="' + nameTxt + '">' + (nameTxt || "(空)") + "</span>" +
+          '<span class="badge text-bg-secondary flex-shrink-0">' + modeLabel + "</span>" +
+          '<span class="small flex-shrink-0">' + st.label + "</span>" +
+          '<button class="btn btn-outline-secondary btn-sm py-0 px-1 flex-shrink-0" title="删除任务" ' +
+              'onclick="removeTask(\'' + t.task_id + '\')">✕</button>' +
+          "</div>";
+  card += '<div class="progress" style="height:6px" role="progressbar" aria-valuenow="' + st.pct + '" aria-valuemin="0" aria-valuemax="100">' +
+          '<div class="progress-bar' + (st.striped ? " progress-bar-striped progress-bar-animated" : "") +
+          '" style="width:' + st.pct + '%"></div></div>';
+  if (t.state === "ready" || t.state === "done") {
+    card += '<div class="d-flex justify-content-between align-items-center mt-1">' +
+            '<span class="small text-muted">' + st.detail + "</span>" +
+            '<a class="btn btn-sm btn-primary" href="' + BASE + "api/archive/dl?id=" + encodeURIComponent(t.task_id) + '">⬇ 下载</a>' +
+            "</div>";
+  } else if (st.detail) {
+    card += '<div class="small text-muted text-truncate mt-1">' + st.detail + "</div>";
+  }
+  if (t.skipped_count > 0) {
+    card += '<div class="mt-1"><button class="btn btn-sm btn-outline-warning py-0" ' +
+            'onclick="toggleSkip(this)">⚠ 跳过 ' + t.skipped_count + " 项 ▾</button></div>";
+  }
+  return card + "</div>";
+}
+
+// 展开/收起跳过清单（拉单任务详情拿完整列表）
+function toggleSkip(btn) {
+  const card = btn.closest(".pk-task");
+  const wrap = card.querySelector(".pk-skiplist");
+  if (wrap) { wrap.remove(); btn.textContent = "⚠ 跳过 " + (card.dataset.skips || "") + " 项 ▾"; return; }
+  const id = card.dataset.id;
+  fetch(BASE + "api/archive?id=" + encodeURIComponent(id))
+    .then(r => r.json())
+    .then(j => {
+      if (!j || !j.task || !j.task.skipped) return;
+      const div = document.createElement("div");
+      div.className = "pk-skiplist small text-muted mt-1";
+      div.innerHTML = j.task.skipped.map(k =>
+        "<div>· " + esc(k.path) + "（" + esc(k.reason) + "）</div>").join("");
+      btn.parentElement.appendChild(div);
+      btn.textContent = "⚠ 跳过 " + j.task.skipped.length + " 项 ▴";
+      card.dataset.skips = j.task.skipped.length;
+    })
+    .catch(() => { /* 静默 */ });
+}
+
+function removeTask(id) {
+  const t = archTasks[id];
+  if (!t) return;
+  if (archFinalStates.indexOf(t.state) >= 0) {
+    delete archTasks[id];      // 终态：本地立即移除，服务端删除后轮询同步
+  } else {
+    t.state = "aborted";       // 活任务：本地先置取消态，服务端收敛后同步
+  }
+  renderArchPanel();
+  fetch(BASE + "api/archive/cancel?id=" + encodeURIComponent(id), { method: "POST" })
+    .catch(() => { /* 静默 */ });
+}
+
+// 顶部总进度 = 非终态任务字节加权，迷你条/摘要同步
+function updateTotal() {
+  const all = Object.keys(archTasks).map(k => archTasks[k]);
+  const active = all.filter(t => archFinalStates.indexOf(t.state) < 0);
+  let sumDone = 0, sumTotal = 0;
+  active.forEach(t => { sumDone += t.done_bytes || 0; sumTotal += t.total_bytes || 0; });
+  const pct = sumTotal > 0 ? Math.round(sumDone / sumTotal * 100) : 0;
+  const n = all.length;
+  $("packSummary").textContent = n + " 任务 · " + pct + "%";
+  $("packSummary").classList.toggle("d-none", n === 0);
+  $("packTotalBar").style.width = pct + "%";
+  const mini = $("packMiniBar");
+  if (n > 0 && $("packPanel").classList.contains("d-none")) {
+    mini.textContent = "📦 " + n + " 任务 · " + pct + "%";
+    mini.classList.remove("d-none");
+  } else if (n === 0) {
+    mini.classList.add("d-none");
   }
 }
 
+// 提交区预览树：置顶顶层项（名称+大小，目录带 ▶ 可展开统计，不递归）
+function createPackPreview() {
+  const box = $("packPreviewTree");
+  if (!box) return;
+  $("packNewLabel").textContent = "将打包置顶的 " + pinned.length + " 项";
+  $("packNewLabel").classList.toggle("d-none", !pinned.length);
+  if (!pinned.length) { box.innerHTML = ""; return; }
+  box.innerHTML = pinned.map(p => {
+    return '<div class="pk-prow d-flex align-items-center gap-2"' +
+           (p.is_dir ? ' data-dir="' + esc(p.path) + '"' : "") + ">" +
+           '<span class="flex-shrink-0 small">' + (p.is_dir ? "📁" : "📄") + "</span>" +
+           '<span class="pk-nm flex-grow-1 text-truncate">' + esc(p.name) + "</span>" +
+           '<span class="pk-size text-muted small flex-shrink-0">' + fmtSize(p.size) + "</span>" +
+           (p.is_dir
+             ? '<button class="btn btn-sm py-0 px-1 flex-shrink-0 pk-dir-btn" onclick="previewDir(this)">▶</button>'
+             : "") +
+           "</div>";
+  }).join("");
+}
+
+// 目录统计预览：点击 ▶ 拉 child_count/child_bytes 行内展示
+function previewDir(btn) {
+  const row = btn.closest(".pk-prow");
+  const path = row.dataset.dir;
+  if (!path) return;
+  btn.disabled = true;
+  fetch(BASE + "api/archive/preview?paths=" + encodeURIComponent(path))
+    .then(r => r.json())
+    .then(j => {
+      btn.disabled = false;
+      if (!j || !j.items || !j.items.length) return;
+      const it = j.items[0];
+      const sizeEl = row.querySelector(".pk-size");
+      if (sizeEl) {
+        sizeEl.textContent = it.child_count === -1
+          ? "▶ 统计失败（无权限）"
+          : "▶ " + it.child_count + " 个子项 · 共 " + fmtSize(it.child_bytes);
+      }
+      const was = btn.textContent;
+      btn.textContent = was === "▶" ? "▼" : was;   // 展开态标记
+    })
+    .catch(() => { btn.disabled = false; });
+}
+
+// 提交打包任务
+async function submitPack() {
+  if (!pinned.length) { toast("还没有置顶文件"); return; }
+  try {
+    const r = await fetch(BASE + "api/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths: pinned.map(p => p.path), mode: packMode }),
+    });
+    const j = await r.json();
+    if (r.status === 429) { toast("打包任务过多，请稍后再试"); return; }
+    if (!r.ok) { toast((j && j.error) || "提交打包失败（HTTP " + r.status + "）"); return; }
+    openPanel();
+    pollArchives();          // 立即拉一次让新任务马上可见
+    toast("已提交打包任务");
+  } catch (e) { toast("提交失败: " + (e && e.message || e)); }
+}
+
+// 打开打包中心（不阻塞不 disabled：随时可点，观众可继续浏览）
 $("packBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }
-  startPack("normal");
+  openPanel();
 };
 
-// 压缩级别下拉：store=最快 / fast=快 / normal=标准
-document.querySelectorAll("[data-amode]").forEach(el => {
-  el.onclick = (ev) => {
-    ev.preventDefault();
-    if (!pinned.length) { toast("还没有置顶文件"); return; }
-    startPack(el.getAttribute("data-amode"));
+$("packSubmitBtn").onclick = submitPack;
+
+// 压缩级别单选（面板内 btn-group，active 类切换）
+document.querySelectorAll("#packModeGroup [data-amode]").forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll("#packModeGroup [data-amode]").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    packMode = btn.getAttribute("data-amode");
   };
 });
 
-$("packCancel").onclick = () => { if (packAbort) packAbort.abort(); };
+$("packPanelClose").onclick = (ev) => {
+  ev.stopPropagation();      // 阻止冒泡到头部（否则点了关闭又触发展开）
+  closePanel();
+};
+$("packPanelHead").onclick = toggleMini;
+$("packMiniBar").onclick = toggleMini;
+
+// 非分享模式才启用打包中心：ESC 关面板 + 页面隐藏暂停轮询/回前台立即刷新
+if (!SHARE_MODE) {
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && !$("packPanel").classList.contains("d-none")) closePanel();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopArchPolling();
+    else { pollArchives(); startArchPolling(); }
+  });
+  startArchPolling();        // 立即起轮询：有活任务时迷你条会弹出，不强制开面板
+  pollArchives();            // 立刻刷一次（不必等第一个 1s 周期）
+}
 
 $("shareAllBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }

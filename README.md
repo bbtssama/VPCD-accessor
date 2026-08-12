@@ -26,7 +26,7 @@
 | `cryptography`（第三方 pip 包） | 生成自签名证书（RSA-2048）、打包 PKCS#12（`server/server.py:44-52`，缺失直接报错退出） | **必需** |
 | `ffprobe.exe`（`C:\Users\user\ffmpeg\bin\ffprobe.exe`，`server.py:72`） | 视频元数据提取（tag/时长/分辨率/码率） | 可选（缺失静默降级 `details=null`） |
 | `ffmpeg.exe`（与 ffprobe 同目录，`server.py:74`） | 视频缩略图、MSE 转码/remux、内嵌字幕提取、缩略图条、单帧预览 | 可选（缺失时对应接口 404/500） |
-| 无（纯 Python `zipfile`） | 打包下载输出 `.zip`（支持目录递归/多选/三种压缩级别，`server.py:3313`） | 内置，零外部依赖 |
+| 无（纯 Python `zipfile`） | 打包下载输出 `.zip`：同步 `/dlzip`（`_stream_archive` `server.py:3586`）+ 打包中心后台任务（`_archive_new_task` `server.py:3710`，分块写入 `_write_entry_chunked` `server.py:3508`） | 内置，零外部依赖 |
 | 无（纯 Python `zipfile`） | zip 包在线解压列表/单条目下载（`server.py:3212/3243`） | 内置，零外部依赖 |
 | `faster_whisper`（pip 可选安装） | 视频语音识别生成字幕（`/api/asr`） | 可选（未安装接口返回 501） |
 | Bootstrap / highlight.js / 文件类型图标 SVG | 前端离线静态资源（`static/` 目录） | 必需（随项目分发，白名单提供） |
@@ -43,13 +43,13 @@
 ├── .mcp.json                  # Claude 插件 MCP 配置：python server/server.py（MCP 模式入口）
 ├── 启动网盘.bat                # Windows 启动脚本：探测 Python → 杀残留实例 → 端口占用检查 → --serve auto 启动，崩溃 30s 自动重启
 ├── server/
-│   ├── server.py               # 主服务（约 3880 行）：单端口（HTTPS/HTTP 首字节嗅探）+ MCP/CLI 双模式，全部核心逻辑
+│   ├── server.py               # 主服务（约 4380 行）：单端口（HTTPS/HTTP 首字节嗅探）+ MCP/CLI 双模式，全部核心逻辑
 │   ├── mcp_stdio.py            # 零依赖 MCP stdio 框架（240 行）：JSON-RPC 2.0 行协议
 │   ├── templates/
-│   │   └── index.html          # 前端模板（299 行）：页面骨架 + 全部 CSS + 侧边栏结构；每次请求实时读盘支持热更新
+│   │   └── index.html          # 前端模板（约 359 行）：页面骨架 + 全部 CSS + 打包中心面板；每次请求实时读盘支持热更新
 │   └── __pycache__/            # Python 字节码缓存（可删除）
 └── static/
-    ├── app.js                  # 前端主逻辑（约 3680 行）：列表/网格、侧边栏筛选/排序/搜索、推荐标签、模糊匹配、播放器、预览、分享等
+    ├── app.js                  # 前端主逻辑（约 3970 行）：列表/网格、侧边栏筛选/排序/搜索、推荐标签、模糊匹配、播放器、预览、分享、打包中心等
     ├── cjk-normalize.js        # 简繁/日式新字体归一化映射表（opencc-data 1.4.1，28KB，全局 normalizeCJK）
     ├── bootstrap.min.css / bootstrap.bundle.min.js   # 离线 Bootstrap 5
     ├── highlight.min.css / highlight.min.js          # 离线代码高亮
@@ -106,7 +106,7 @@
 - **视频元数据** `_video_details`（`server.py:1722`）：ffprobe `-show_format -show_streams` 提取 tag/时长/码率/分辨率/声道等，进程内缓存 key=(realpath,size,mtime)（`server.py:1606`），任何失败静默返回 None；`_parse_comment_meta`（`server.py:1609`）把 comment 标签解析为结构化键值（上传/观看/点赞/标签/作者/类型），`_video_meta`（`server.py:1674`）构建前端详情面板数据。
 - **meta=1 批量元数据**（见第 5.4 节）：`_meta_kind`（`server.py:1858`）扩展名→ 分类/mime；`_video_meta_cached`（`server.py:1880`）仅从进程内缓存读视频内容元数据（零 IO）；`_probe_video_meta`（`server.py:1916`）后台并发探测；`_augment_entries_meta`（`server.py:1941`）给每个 entry 附加 meta 字段。
 - **缩略图** `_thumb_path`（`server.py:2084`）：ffmpeg 抽帧第 3 秒（失败回退 0 秒），`scale=360:-2`，缓存 `static/thumbs/<md5(realpath|size|mtime)>.jpg`。
-- **打包**：`_stream_archive`（`server.py:3313`）统一核心（纯 zipfile）：普通打包（`_build_archive_items` `server.py:3279` 组装 arcname）与虚拟分享打包共用同一核心；支持 `mode=store|fast|normal` 三种压缩级别（`_ARCHIVE_MODES` `server.py:3272`）、scandir 递归展开目录（含空目录，visited+depth 防循环）、失败文件跳过清单（响应头 `X-Archive-Skipped`，URL 编码 JSON）、同时最多 2 个打包任务（`_ARCHIVE_SEM` `server.py:3268`）、临时盘空间预检。
+- **打包**：核心已拆分为三函数——`_scan_plan`（`server.py:3404`，纯扫描展开清单 `(plan, dirs, total_size, skipped)`，visited_dirs+depth 防循环、junction 目录跳过）、`_write_zip_entries`（`server.py:3539`，目录条目 + 文件条目写入；task=None 走 `zf.write` 直传保持旧行为，task 给定走 `_write_entry_chunked` `server.py:3508` 分块写、推进度、支持取消）、`_stream_archive`（`server.py:3586`，薄封装：信号量非阻塞 429 + 临时盘空间预检 + 调 scan/write + 流式响应 `X-Archive-Skipped` 跳过清单头）。`_build_archive_items`（`server.py:3370`）组装 arcname；`_ARCHIVE_MODES` `server.py:3347` 三种压缩级别（store/fast/normal）；`_ARCHIVE_SEM` `server.py:3343` 同时最多 2 个压缩任务（同步/后台共享额度）。后台任务体系见第 7.4 节。
 - **解压**：`_unpack_list`（`server.py:3212`）/`_unpack_download`（`server.py:3243`）仅支持 zip（zipfile 流式），其它格式返回 unsupported。
 - **防火墙**：`_add_firewall_rule`（`server.py:3644`）netsh 添加入站规则 `TransferMCP-<port>`，失败返回含修复命令的提示；`_remove_firewall_rule`（`server.py:3668`）停止时删除。
 - **URL 生成**：`_public_ipv6`（`server.py:3617`）找非链路本地非 ULA 的 IPv6；`_urls`（`server.py:3631`）HTTPS 链接、`_urls_http`（`server.py:3637`）HTTP 免证书链接（**与 HTTPS 同一端口**）。
@@ -142,15 +142,16 @@
 
 | 线程 | 启动处 | 周期 | 职责 |
 |---|---|---|---|
-| HTTPS/HTTP 服务 `serve_forever` | `_start` `server.py:3679` | 常驻 | 8443（单端口，首字节嗅探自动识别 TLS/明文） |
-| `_trans_sweep_loop` | `_start` `server.py:3679` | 5s | 回收空闲转码会话 |
-| `_cache_sweep_loop` | `_start` `server.py:3679` | 600s | 转码缓存磁盘治理 |
+| HTTPS/HTTP 服务 `serve_forever` | `_start` `server.py:4144` | 常驻 | 8443（单端口，首字节嗅探自动识别 TLS/明文） |
+| `_trans_sweep_loop` | `_start` `server.py:4144` | 5s | 回收空闲转码会话 |
+| `_cache_sweep_loop` | `_start` `server.py:4144` | 600s | 转码缓存磁盘治理 |
+| 打包工人（每任务一个，daemon） | `_archive_new_task` `server.py:3710` | 任务级 | 排队→扫描→压缩→ready，finally 释放信号量 |
 
 ## 6. 完整路由 / API 清单
 
 ### 6.1 主站路由（前缀 `/transfer/`，token 可变）
 
-**token 前缀保护机制**（`do_GET` `server.py:994-997`）：除 `/s/` 分享路由外，所有主站请求必须满足 `path == "/<token>"` 或以 `"/<token>/"` 开头，否则返回 403 `{"error":"无效 token"}`。**访问 `/transfer`（无尾部斜杠）会 301 重定向到 `/transfer/`**（`server.py:998-1003`）——否则页面内相对路径 `static/...` 会被浏览器解析成 `/static/...`（丢失 token 前缀）导致 403。`do_POST` 同理要求 `/<token>/` 前缀（`server.py:1283-1286`）。
+**token 前缀保护机制**（`do_GET` `server.py:995-997`）：除 `/s/` 分享路由外，所有主站请求必须满足 `path == "/<token>"` 或以 `"/<token>/"` 开头，否则返回 403 `{"error":"无效 token"}`。**访问 `/transfer`（无尾部斜杠）会 301 重定向到 `/transfer/`**（`server.py:998-1003`）——否则页面内相对路径 `static/...` 会被浏览器解析成 `/static/...`（丢失 token 前缀）导致 403。`do_POST` 同理要求 `/<token>/` 前缀（`server.py:1332-1335`）。
 
 | 方法 | 路径 | 参数 | 返回 / 说明 |
 |---|---|---|---|
@@ -180,7 +181,13 @@
 | GET | `/api/unpack` | `path` | 压缩包条目列表（仅 zip，其它格式 `unsupported`） |
 | GET | `/api/unpackdl` | `archive`、`entry` | 下载压缩包内单个条目 |
 | GET | `/dl` | `path` | 通用下载（Range 断点续传，attachment） |
-| GET | `/dlzip` | `paths`(竖线分隔)、`mode=store\|fast\|normal` | 多文件/目录打包下载 zip（`X-Archive-Format: zip`、失败跳过清单 `X-Archive-Skipped` 头） |
+| GET | `/dlzip` | `paths`(竖线分隔)、`mode=store\|fast\|normal` | 多文件/目录**同步**打包下载 zip（`X-Archive-Format: zip`、失败跳过清单 `X-Archive-Skipped` 头；`_stream_archive` `server.py:3586`） |
+| GET | `/api/archives` | - | 打包中心任务列表（轻量快照 `{tasks:[...]}`；惰性执行 TTL 清理与上限逐出，`_archive_poll_cleanup` `server.py:3863`） |
+| GET | `/api/archive` | `id` | 单任务详情（含完整 `skipped` 跳过清单）；不存在 404 |
+| GET | `/api/archive/dl` | `id` | 原生下载已就绪的 zip：仅 `ready/done` 放行，其它 409 `{"error":"压缩尚未完成"}`；流完成置 `done`，断连回滚 `ready` 可再下载（`_archive_dl` `server.py:3919`） |
+| GET | `/api/archive/preview` | `paths`(竖线分隔) | 打包预览统计：文件行 `{name,is_dir,size}`、目录行 `{name,is_dir,size:null,child_count,child_bytes}`（权限失败 `child_count=-1`）；全部走 `_resolve` 越界校验 |
+| POST | `/api/archive` | body JSON `{paths:[...], mode}` | 创建后台打包任务：`mode` 非法回退 normal；排队上限（`_ARCHIVE_QUEUE_MAX` `server.py:3359`）达到 → 429 `{queue_full:true,"error":"打包任务过多，请稍后再试"}`；成功返回 `{task_id}` |
+| POST | `/api/archive/cancel` | `id` | 取消/删除任务：活任务（queued/scanning/compressing/downloading）置取消事件收敛 `aborted`；终态立即删任务+临时文件；不存在 404 |
 | POST | `/api/upload` | `path` + multipart/form-data | 上传文件到当前目录（cgi.FieldStorage，中文文件名 latin-1→utf-8 修正） |
 
 ### 6.2 分享路由（前缀 `/s/<share_token>/`，与主 token 完全隔离）
@@ -208,14 +215,15 @@
 
 ## 7. 前端功能清单（index.html + app.js）
 
-入口 `init()`（`app.js:2228`）：分享模式隐藏主站 UI（磁盘/置顶/打包/上传，`hideMainUi` `app.js:2219`）只读浏览分享根；主站模式加载磁盘/置顶并**从 localStorage 恢复上次目录与视图**。
+入口 `init()`（`app.js:2229`）：分享模式隐藏主站 UI（磁盘/置顶/打包/上传，`hideMainUi` `app.js:2218`）只读浏览分享根；主站模式加载磁盘/置顶并**从 localStorage 恢复上次目录与视图**，并在非分享模式注册打包中心轮询（页面隐藏自动暂停）。
 
 | 功能 | 说明 | 位置 |
 |---|---|---|
 | 磁盘标签页 | 顶部横向滚动胶囊按钮，点击切换磁盘根 | `renderDriveTabs` `app.js:2295` |
 | 面包屑 + 后退/前进 | 分段导航；栈式前进后退（`_pushNav` `app.js:2409`，按钮 `app.js:2420-2421`） | `renderBreadcrumb` `app.js:2341` |
 | 列表/网格视图 | 网格视图视频显示 ffmpeg 缩略图封面（失败回退图标）；视图偏好持久化 | `listItem` `app.js:3118` / `gridItem` `app.js:3154` |
-| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消；打包（下拉选 store=最快/fast=快/normal=标准）与"全部分享"按钮；打包走 fetch+Blob 流式下载，带进度条/取消/失败清单弹窗 | `renderPinned` `app.js:2314` |
+| 置顶（星标） | 列表/网格行内 ☆ 切换；置顶卡片区提供下载/分享/取消与「📦 打包」按钮（打开打包中心面板）；**置顶卡头部可点击折叠**（默认切目录即收起，chevron ▲/▼ 同步，`index.html:205-226`），折叠头实时标题「📌 置顶文件 · N 项 · 共 X」；打包按钮不再 disabled（后台任务，随时可点） | `renderPinned` `app.js:2313`、`pinnedHead` 折叠 `app.js:2348-2352` |
+| 打包中心面板 | 右下角悬浮面板（`index.html:252-278`，CSS `index.html:155-179`）：任务列表每 1s 轮询重建（`pollArchives` `app.js:3297`，`document.hidden` 暂停、回前台立即刷新）；任务卡含状态机文案/阶段性进度条/跳过清单展开（`renderTask` `app.js:3356`）、✕ 删除（活任务先本地置取消态再 POST，`removeTask` `app.js:3410`）、ready/done 显示「⬇ 下载」**原生下载**（`location.href = /api/archive/dl?id=`，无 Blob）；提交区：压缩级别单选 + 置顶项预览树（目录 ▶ 拉 `child_count/child_bytes` 行内统计，不递归，`createPackPreview` `app.js:3444`）+「＋ 提交打包」（`submitPack` `app.js:3488`）；顶部总进度=非终态字节加权（`updateTotal` `app.js:3424`）；迷你条/面板互斥（头部点击折叠露头） | 见第 7.4 节 |
 | 上传 | 多文件顺序上传 + 进度条；分享模式无此按钮 | `app.js:3353-3385` |
 | 下载 | 非预览类型直接跳 `/dl`；统一 `dlUrl()`（`app.js:908`） | `bindRowAction` `app.js:3209` |
 | 视频播放器 | 画质选择（原画/高清/标清/低清）、**MSE 免证书模式**、缓存下载开关、字幕（track/overlay）、ASR 识别（语言切换）、进度条悬停预览（缩略图条 + 单帧 80ms 防抖）、视频详情面板（标题/作者/类型/统计/标签/技术徽章）、原画→高清自动降级 | `showVideo` `app.js:1164` |
@@ -274,6 +282,18 @@
 
 **页面细节**：`index.html:7` 有 `<link rel="icon" href="data:,">` 消除 favicon 请求（避免 403 干扰）；品牌色覆盖 Bootstrap primary 为 `#2563eb`（`index.html:12-15`）；手机端触控目标 ≥44px（`index.html:123-127`）；侧边栏宽度 `min(320px, 86vw)`（`index.html:132`）。
 
+### 7.4 打包中心（后台任务）
+
+网页打包从"同步请求等 zip 落盘"改为**后台任务**：`POST /api/archive` 创建任务后立刻返回，工人线程（daemon，`_archive_worker` `server.py:3774`）在后台排队/扫描/压缩，前端轮询进度、完成后原生下载。**打包期间所有按钮不 disabled，不遮罩不锁滚动，观众可继续浏览**。
+
+- **任务状态机**：`queued→scanning→compressing→ready→downloading→done`；任意非终态可 `cancel→aborted`（置 `cancel_evt`，`_write_entry_chunked` 每块前检查并抛 `_ArchiveAborted` 收敛）；压缩异常→`failed`（error 文案进任务卡）；下载中断（前端断连）→ 回滚 `ready` 可再下载。任务表 `_ARCHIVE_TASKS`（全局 dict + RLock），字段含 `total_bytes/done_bytes/current_file/file_done/file_total/skipped/dl_total_bytes/bytes_sent/cancel_evt/lock`。
+- **并发排队**：`_ARCHIVE_QUEUE_MAX=6`（queued+scanning+compressing 计数，超限 429 `queue_full`）；信号量 `_ARCHIVE_SEM`（2，与同步 `/dlzip` 共享）即排队，worker `finally` 必 release；`_ARCHIVE_TASK_CAP=16` 任务表上限 + 30min TTL 惰性逐出（`_archive_poll_cleanup` `server.py:3863`，在 `/api/archives` 与创建时执行，无后台守线程）。
+- **临时文件**：任务 zip 统一 `tempfile.gettempdir()/tk_<task_id>.zip`（可预测名字）；worker 压缩期先 mkstemp+unlink 让 ZipFile 自建、完成后 `rename` 到固定名；`_start` 启动清扫 `_archive_sweep_tmp`（`server.py:3693`）glob 精确匹配删除崩溃残留。
+- **分块进度**：`_write_entry_chunked`（`server.py:3508`）按 1MB 块（`_ARCHIVE_CHUNK`）写 zip，推进度/当前文件/取消检查；`force_zip64` 决策与 `zf.write` 一致（>2GB 文件才启用），**实测同一目录同步 `/dlzip`（zf.write）与任务（分块写）产出 zip md5 完全一致**。
+- **原生下载**：`GET /api/archive/dl?id=`（`_archive_dl` `server.py:3919`）Content-Length + `Content-Disposition: attachment; filename*=UTF-8''打包下载_<ts>.zip`，前端 `location.href` 直链（无 Blob 不占内存）；每 4MB 更新 `bytes_sent` 供下载进度。
+- **置顶折叠**：置顶卡头部可点击折叠（CSS `.pinned-fold`，`index.html`），**默认切目录即收起**（`loadList` `app.js:3089-3114`），chevron ▲/▼ 同步，不持久化。
+- **预览统计**：`/api/archive/preview` 对目录返回 `child_count/child_bytes`（首层文件大小和），权限失败 `child_count=-1`；面板内"▶"点击拉取行内展示，不递归。
+
 ## 8. 数据与状态
 
 | 数据 | 位置 | 格式 / 说明 |
@@ -284,6 +304,7 @@
 | 视频缩略图 | `static/thumbs/<md5(realpath\|size\|mtime)>.jpg` | ffmpeg 抽帧，文件变化自动失效，已在 .gitignore 排除（`server.py:2084-2121`） |
 | 视频元数据缓存 | 进程内存 `_video_details_cache` | key=(realpath,size,mtime)，ffprobe 失败也缓存 None；meta=1 的深度查找/推荐标签均只读此缓存（`server.py:1606`） |
 | 置顶列表 pinned | 仅内存（`_DriveServer.pinned` / `_state["pinned"]`） | **重启即丢失**；由 MCP `drive_pin` 或网页星标维护 |
+| 打包任务表 | 进程内存 `_ARCHIVE_TASKS`（`server.py:3357`） | task_id 为键，含状态机字段；30min TTL + 上限 16 惰性逐出；临时 zip 在系统临时目录 `tk_<task_id>.zip`（**重启即清**，启动清扫） |
 | 推荐标签缓存 | 前端内存 `_tagCache`（Map: path → scores） | per-path 缓存避免重复扫描；目录切换自动失效重扫（`app.js:2548, 3111`） |
 | 前端状态 | 浏览器 localStorage | `drive.*` 键，见第 7 节 |
 
@@ -309,7 +330,8 @@
 | 静态资源白名单 | bootstrap.min.css / bootstrap.bundle.min.js / app.js / highlight.min.js / highlight.min.css / **cjk-normalize.js** + icons/*.svg | `server.py:66-69` |
 | 文本预览默认/上限 | 默认 1MB，钳制 16KB~4MB | `server.py:2001, 2041-2054` |
 | 转码输出 | H.264 High 5.1 (avc1.640033) + aac 128k，crf 27，keyint 60，fMP4 | `server.py:2362-2386` |
-| 防火墙规则名 | `TransferMCP-<port>` | `server.py:3645` |
+| 防火墙规则名 | `TransferMCP-<port>` | `server.py:4109` |
+| `_ARCHIVE_QUEUE_MAX` / `_ARCHIVE_TASK_CAP` / `_ARCHIVE_CHUNK` / `_ARCHIVE_TASK_TTL` | 6 / 16 / 1MB / 30min（打包中心排队上限、任务表上限、分块写块大小、任务 TTL） | `server.py:3359-3362` |
 | MCP 首选协议 | 2025-06-18 | `mcp_stdio.py:22` |
 | 搜索防抖 | 150ms | `app.js:3015` |
 | `FUZZY_SCORE_MIN` / `FUZZY_MULTI_MIN` / `FUZZY_PRESCREEN` | 0.8 / 0.8 / 0.6（模糊判定阈值/字符硬约束/预筛） | `app.js:2661-2663` |

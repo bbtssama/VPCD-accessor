@@ -36,6 +36,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -1265,6 +1266,43 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 self._send_error_page("压缩包不存在或越界", str(arch))
                 return
             _unpack_download(self, arch, entry)
+        elif route == "/api/archives":
+            # 打包中心：任务列表（轻量快照；惰性清理 TTL 过期任务与超上限逐出）
+            _archive_poll_cleanup()
+            with _ARCHIVE_TASKS_LOCK:
+                tasks = [_archive_task_light(t) for t in _ARCHIVE_TASKS.values()]
+            tasks.sort(key=lambda t: t["created_at"])
+            self._send_json({"tasks": tasks})
+        elif route == "/api/archive":
+            # 打包中心：单任务详情（含完整 skipped 清单，供前端展开跳过列表）
+            task = _ARCHIVE_TASKS.get(q.get("id") or "")
+            if task is None:
+                self._send_json({"error": "任务不存在"}, 404)
+                return
+            self._send_json({"task": _archive_task_light(task, full=True)})
+        elif route == "/api/archive/dl":
+            # 打包中心：原生下载已就绪的 zip（签 ready/done 才放行）
+            task = _ARCHIVE_TASKS.get(q.get("id") or "")
+            if task is None:
+                self._send_json({"error": "任务不存在"}, 404)
+                return
+            _archive_dl(self, task)
+        elif route == "/api/archive/preview":
+            # 打包中心：预览面板目录统计（子项数/首层文件大小和，不递归）
+            items = []
+            for x in (q.get("paths") or "").split("|"):
+                if not x:
+                    continue
+                p = self._resolve(x)
+                if p is None:
+                    self._send_json({"error": "包含无效路径: %s" % x}, 403)
+                    return
+                info = _archive_preview(p)
+                if info is None:
+                    self._send_json({"error": "包含无效路径: %s" % x}, 403)
+                    return
+                items.append(info)
+            self._send_json({"items": items})
         elif route == "/dl":
             # 下载（支持 Range 断点续传；token 在 URL 里，中途换 IP 也能继续）
             p = self._resolve(q.get("path") or "")
@@ -1302,6 +1340,43 @@ class _DriveHandler(BaseHTTPRequestHandler):
             return
         route = self.path[len(tok):].split("?")[0].rstrip("/") or "/"
         q = self._query()
+        if route == "/api/archive":
+            # 打包中心：创建后台打包任务（body JSON: {paths:[...], mode}）
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            body = {}
+            if length > 0:
+                try:
+                    body = json.loads(self.rfile.read(length).decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    body = {}
+            paths = body.get("paths") if isinstance(body, dict) else None
+            if not isinstance(paths, list):
+                self._send_json({"error": "paths 必须是字符串数组"}, 400)
+                return
+            mode = body.get("mode") or "normal"
+            task, err = _archive_new_task(paths, mode)
+            if err is not None:
+                self._send_json(err, 429 if err.get("queue_full") else 400)
+                return
+            self._send_json({"task_id": task["task_id"]})
+            return
+        if route == "/api/archive/cancel":
+            # 打包中心：取消/删除任务——活任务置取消事件（工人收敛 aborted），终态立即删除
+            task = _ARCHIVE_TASKS.get(q.get("id") or "")
+            if task is None:
+                self._send_json({"error": "任务不存在"}, 404)
+                return
+            with task["lock"]:
+                if task["state"] in ("queued", "scanning", "compressing", "downloading"):
+                    task["cancel_evt"].set()
+                else:
+                    # ready/done/failed/aborted：终态直接删任务 + 临时文件
+                    _archive_delete_task(task)
+            self._send_json({"ok": True})
+            return
         if route != "/api/upload":
             self._send_json({"error": "404"}, 404)
             return
@@ -3275,6 +3350,22 @@ _ARCHIVE_MODES = {
     "normal": (zipfile.ZIP_DEFLATED, None),
 }
 
+# ---- 打包中心：后台任务表与常量 ----
+# 任务状态机：queued→scanning→compressing→ready→downloading→done；
+# 任意非终态可 cancel→aborted；压缩异常→failed；下载中断→回滚 ready（可再下载）。
+# 任务 dict 字段见 _archive_new_task；临时 zip 统一命名 tk_<task_id>.zip（可预测，供启动清扫）。
+_ARCHIVE_TASKS = {}            # task_id -> dict，全局任务表
+_ARCHIVE_TASKS_LOCK = threading.RLock()
+_ARCHIVE_QUEUE_MAX = 6         # queued+scanning+compressing 总数上限（超出 429）
+_ARCHIVE_TASK_CAP = 16         # 任务表总条数上限（逐出最旧终态）
+_ARCHIVE_CHUNK = 1 << 20       # 分块写 zip 的读块大小
+_ARCHIVE_TASK_TTL = 30 * 60    # 终态/排队任务 inert 过期时长（秒），惰性清理
+
+
+class _ArchiveAborted(Exception):
+    """打包任务被取消时抛出，工人线程收敛到 aborted 状态。"""
+    pass
+
 
 def _build_archive_items(paths):
     """ 普通打包：把选中路径组装为 (arcname, realpath) 列表。
@@ -3310,6 +3401,188 @@ def _build_archive_items(paths):
     return items
 
 
+def _scan_plan(items):
+    """扫描选中路径，展开为打包清单（纯扫描，不做磁盘预检/写包）。
+
+    返回 (plan, dirs, total_size, skipped)：
+      plan: [(arcname, realpath)] 待打包文件清单
+      dirs: [(arcname, realpath)] 目录清单（空目录也要写目录条目）
+      total_size: 文件总大小估算（临时盘空间预检用）
+      skipped: [{path, reason}] 无法读取的项（读不了的文件/目录）
+    """
+    plan = []            # 待打包文件清单 [(arcname, realpath)]
+    dirs = []            # 目录清单 [(arcname, realpath)]（空目录也要写目录条目）
+    visited_dirs = set()  # 已展开目录的 realpath（防 junction/符号链接循环）
+    seen_files = set()    # 已登记文件的 realpath（同一真实文件只入包一次）
+    seen_dirs = set()     # 已登记目录条目的 arcname（重叠选择时不写重复目录条目）
+    total_size = 0        # 文件总大小估算（临时空间预检用）
+    skipped = []          # 跳过清单：[{path, reason}]
+
+    def expand(arcname, rpath, depth):
+        # 递归展开目录：目录与文件都登记，visited+depth 双重防循环
+        # 返回 True 表示目录成功扫描（含空目录）；False 表示目录无法读取
+        nonlocal total_size
+        if depth > 64:
+            return True
+        try:
+            real = os.path.realpath(rpath)
+        except Exception:  # noqa: BLE001
+            skipped.append({"path": rpath, "reason": "无法解析路径"})
+            return False
+        if real in visited_dirs:
+            return True
+        visited_dirs.add(real)
+        try:
+            with os.scandir(rpath) as it:
+                for e in it:
+                    try:
+                        is_dir = e.is_dir(follow_symlinks=False)
+                    except OSError:
+                        is_dir = False
+                    child = (arcname + "/" + e.name) if arcname else e.name
+                    if is_dir:
+                        # 目录：先判重解析点（junction/符号链接目录），命中则不递归。
+                        # junction 的 is_dir(follow_symlinks=False)=True 而 realpath 会解析
+                        # 到目标，若目标在包外会把无关内容打进 zip（隐私/体积风险）
+                        try:
+                            is_reparse = bool(
+                                e.stat(follow_symlinks=False).st_file_attributes & 0x400
+                            )
+                        except OSError:
+                            is_reparse = False
+                        if is_reparse:
+                            skipped.append({"path": e.path, "reason": "链接目录未包含"})
+                            continue
+                        if child not in seen_dirs:
+                            seen_dirs.add(child)
+                            dirs.append((child, e.path))
+                        expand(child, e.path, depth + 1)
+                    else:
+                        try:
+                            freal = os.path.realpath(e.path)
+                        except Exception:  # noqa: BLE001
+                            freal = e.path
+                        if freal in seen_files:
+                            continue  # 同一真实文件不重复入包
+                        seen_files.add(freal)
+                        plan.append((child, e.path))
+                        try:
+                            total_size += e.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            pass
+            return True
+        except OSError as exc:
+            # scandir 失败：跳过该目录并记录，不再静默
+            skipped.append({"path": rpath, "reason": "目录无法读取: %s" % exc})
+            return False
+
+    for arcname, rpath in items:
+        arcname = arcname.replace("\\", "/").strip("/")
+        if not arcname:
+            arcname = os.path.basename(rpath.rstrip("\\/")) or "item"
+        if os.path.isdir(rpath):
+            # 顶层目录：先展开，扫描成功（含空目录）才登记目录条目；
+            # 无法读取的顶层目录只进 skipped，避免"看似成功"的空 zip 包
+            scanned = expand(arcname, rpath, 0)
+            if scanned and arcname not in seen_dirs:
+                seen_dirs.add(arcname)
+                dirs.append((arcname, rpath))
+        elif os.path.isfile(rpath):
+            try:
+                freal = os.path.realpath(rpath)
+            except Exception:  # noqa: BLE001
+                freal = rpath
+            if freal in seen_files:
+                continue
+            seen_files.add(freal)
+            plan.append((arcname, rpath))
+            try:
+                total_size += os.path.getsize(rpath)
+            except OSError:
+                pass
+        else:
+            skipped.append({"path": rpath, "reason": "路径不存在或无法访问"})
+    return plan, dirs, total_size, skipped
+
+
+def _write_entry_chunked(zf, task, arcname, rpath):
+    """分块写单个文件进 zip（任务模式）：数据/进度/取消一并在内。
+
+    与 zf.write 对标条条对齐：date_time=文件 mtime、external_attr 高 16 位
+    置模式位、compress_type/compresslevel 沿用外层 ZipFile，确保产出 zip
+    与同步打包字节一致（实测同目录 md5 相同）。
+    每块前检查取消事件，命中抛 _ArchiveAborted。
+    """
+    st = os.stat(rpath)
+    zi = zipfile.ZipInfo(arcname.replace("\\", "/"))
+    zi.date_time = time.localtime(st.st_mtime)[:6]
+    zi.external_attr = (st.st_mode & 0xFFFF) << 16
+    zi.compress_type = zf.compression  # zlib 级别由 ZipFile 实例统一（ZipInfo 无此属性）
+    task["current_file"] = arcname
+    task["file_total"] = st.st_size
+    task["file_done"] = 0
+    # 与 zf.write 的 zip64 决策保持一致（>2GB 才启用 zip64，小文件不写 zip64 扩展），
+    # 确保同一目录两种写法产出的 zip 字节一致（实测 md5 相同）
+    force_zip64 = st.st_size > zipfile.ZIP64_LIMIT
+    with open(rpath, "rb") as src, zf.open(zi, "w", force_zip64=force_zip64) as dst:
+        while True:
+            if task["cancel_evt"].is_set():
+                raise _ArchiveAborted()
+            chunk = src.read(_ARCHIVE_CHUNK)
+            if not chunk:
+                break
+            dst.write(chunk)
+            task["done_bytes"] += len(chunk)
+            task["file_done"] += len(chunk)
+
+
+def _write_zip_entries(zf, plan, dirs, task=None, skipped=None):
+    """把打包清单写入 zip（目录条目 + 文件条目）。
+
+    task=None：同步打包（/dlzip 直传），逐文件预检后 zf.write 直传路径，
+    与历史实现完全一致（行为零变化）；
+    task 给定：后台任务打包，分块写入并推进度/支持取消，跳过清单累计到 skipped。
+    """
+    if skipped is None:
+        skipped = []
+    # 先写目录条目（external_attr 置 DOS 目录位，保证空目录也进包）
+    for arcname, rpath in dirs:
+        try:
+            st = os.stat(rpath)
+            zinfo = zipfile.ZipInfo(arcname.rstrip("/") + "/")
+            zinfo.date_time = time.localtime(st.st_mtime)[:6]
+            zinfo.external_attr = 0x10  # DOS 目录属性位
+            zf.writestr(zinfo, b"")
+        except Exception:  # noqa: BLE001
+            pass  # 目录条目写失败不致命，文件条目继续
+    if task is None:
+        # 逐个文件预检：能打开且可读才入包，失败跳过（不终止打包）
+        ok_files = []
+        for arcname, rpath in plan:
+            try:
+                with open(rpath, "rb") as fh:
+                    fh.read(1)
+            except (PermissionError, OSError) as exc:
+                skipped.append({"path": rpath, "reason": "文件无法读取: %s" % exc})
+                continue
+            ok_files.append((arcname, rpath))
+        # 再写文件（预检通过后若仍失败，跳过并记录）
+        for arcname, rpath in ok_files:
+            try:
+                zf.write(rpath, arcname)
+            except Exception as exc:  # noqa: BLE001
+                skipped.append({"path": rpath, "reason": "写入失败: %s" % exc})
+    else:
+        # 任务模式：逐文件分块写，取消事件穿透到 _ArchiveAborted
+        for arcname, rpath in plan:
+            try:
+                _write_entry_chunked(zf, task, arcname, rpath)
+            except _ArchiveAborted:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                skipped.append({"path": rpath, "reason": "写入失败: %s" % exc})
+
+
 def _stream_archive(handler, items, mode="normal"):
     """统一打包核心：把 (arcname, realpath) 映射打包为 zip 并流式下载。
 
@@ -3317,110 +3590,21 @@ def _stream_archive(handler, items, mode="normal"):
     目录项会递归展开（含空目录，目录条目也入包），文件项直接写入。
     mode: "store"（不压缩）/ "fast"（低压缩）/ "normal"（默认压缩）。
     行为：
-      * 信号量限制同时最多 2 个打包任务，超出则阻塞等待。
+      * 信号量限制同时最多 2 个打包任务，超出直接 429 拒绝。
       * 打包前递归估算总大小，临时盘剩余空间不足 → 400。
       * 读不了的文件/目录跳过并记入响应头 X-Archive-Skipped（URL 编码 JSON）。
       * 文件全部跳过且没有任何目录条目 → 400 JSON。
       * 前端断开后捕获写入异常，finally 清理临时文件。
+    已拆分为 _scan_plan（扫描）+ _write_zip_entries（写包）两个可复用函数，
+    本函数仅为薄封装（行为与历史实现一致，打包中心后台任务复用同一核心）。
     """
     compression, level = _ARCHIVE_MODES.get(mode, _ARCHIVE_MODES["normal"])
-    skipped = []  # 跳过清单：[{path, reason}]，通过 X-Archive-Skipped 响应头返回
     if not _ARCHIVE_SEM.acquire(blocking=False):
         # 并发限制：同时最多 2 个打包任务，超出直接拒绝（不让线程无界堆积在排队上）
         handler._send_json({"error": "已有打包任务进行中，请稍后重试"}, 429)
         return
     try:
-        plan = []            # 待打包文件清单 [(arcname, realpath)]
-        dirs = []            # 目录清单 [(arcname, realpath)]（空目录也要写目录条目）
-        visited_dirs = set()  # 已展开目录的 realpath（防 junction/符号链接循环）
-        seen_files = set()    # 已登记文件的 realpath（同一真实文件只入包一次）
-        seen_dirs = set()     # 已登记目录条目的 arcname（重叠选择时不写重复目录条目）
-        total_size = 0        # 文件总大小估算（临时空间预检用）
-
-        def expand(arcname, rpath, depth):
-            # 递归展开目录：目录与文件都登记，visited+depth 双重防循环
-            # 返回 True 表示目录成功扫描（含空目录）；False 表示目录无法读取
-            nonlocal total_size
-            if depth > 64:
-                return True
-            try:
-                real = os.path.realpath(rpath)
-            except Exception:  # noqa: BLE001
-                skipped.append({"path": rpath, "reason": "无法解析路径"})
-                return False
-            if real in visited_dirs:
-                return True
-            visited_dirs.add(real)
-            try:
-                with os.scandir(rpath) as it:
-                    for e in it:
-                        try:
-                            is_dir = e.is_dir(follow_symlinks=False)
-                        except OSError:
-                            is_dir = False
-                        child = (arcname + "/" + e.name) if arcname else e.name
-                        if is_dir:
-                            # 目录：先判重解析点（junction/符号链接目录），命中则不递归。
-                            # junction 的 is_dir(follow_symlinks=False)=True 而 realpath 会解析
-                            # 到目标，若目标在包外会把无关内容打进 zip（隐私/体积风险）
-                            try:
-                                is_reparse = bool(
-                                    e.stat(follow_symlinks=False).st_file_attributes & 0x400
-                                )
-                            except OSError:
-                                is_reparse = False
-                            if is_reparse:
-                                skipped.append({"path": e.path, "reason": "链接目录未包含"})
-                                continue
-                            if child not in seen_dirs:
-                                seen_dirs.add(child)
-                                dirs.append((child, e.path))
-                            expand(child, e.path, depth + 1)
-                        else:
-                            try:
-                                freal = os.path.realpath(e.path)
-                            except Exception:  # noqa: BLE001
-                                freal = e.path
-                            if freal in seen_files:
-                                continue  # 同一真实文件不重复入包
-                            seen_files.add(freal)
-                            plan.append((child, e.path))
-                            try:
-                                total_size += e.stat(follow_symlinks=False).st_size
-                            except OSError:
-                                pass
-                return True
-            except OSError as exc:
-                # scandir 失败：跳过该目录并记录，不再静默
-                skipped.append({"path": rpath, "reason": "目录无法读取: %s" % exc})
-                return False
-
-        for arcname, rpath in items:
-            arcname = arcname.replace("\\", "/").strip("/")
-            if not arcname:
-                arcname = os.path.basename(rpath.rstrip("\\/")) or "item"
-            if os.path.isdir(rpath):
-                # 顶层目录：先展开，扫描成功（含空目录）才登记目录条目；
-                # 无法读取的顶层目录只进 skipped，避免"看似成功"的空 zip 包
-                scanned = expand(arcname, rpath, 0)
-                if scanned and arcname not in seen_dirs:
-                    seen_dirs.add(arcname)
-                    dirs.append((arcname, rpath))
-            elif os.path.isfile(rpath):
-                try:
-                    freal = os.path.realpath(rpath)
-                except Exception:  # noqa: BLE001
-                    freal = rpath
-                if freal in seen_files:
-                    continue
-                seen_files.add(freal)
-                plan.append((arcname, rpath))
-                try:
-                    total_size += os.path.getsize(rpath)
-                except OSError:
-                    pass
-            else:
-                skipped.append({"path": rpath, "reason": "路径不存在或无法访问"})
+        plan, dirs, total_size, skipped = _scan_plan(items)
 
         # 临时盘剩余空间预检：估算总大小超过剩余空间直接拒绝
         try:
@@ -3434,19 +3618,8 @@ def _stream_archive(handler, items, mode="normal"):
         except OSError:
             pass  # disk_usage 失败不阻塞打包
 
-        # 逐个文件预检：能打开且可读才入包，失败跳过（不终止打包）
-        ok_files = []
-        for arcname, rpath in plan:
-            try:
-                with open(rpath, "rb") as fh:
-                    fh.read(1)
-            except (PermissionError, OSError) as exc:
-                skipped.append({"path": rpath, "reason": "文件无法读取: %s" % exc})
-                continue
-            ok_files.append((arcname, rpath))
-
         # 一个文件都没打成且没有任何目录条目 → 400
-        if not ok_files and not dirs:
+        if not plan and not dirs:
             handler._send_json({"error": "所有选中项均无法读取"}, 400)
             return
 
@@ -3462,22 +3635,7 @@ def _stream_archive(handler, items, mode="normal"):
             else:
                 zf = zipfile.ZipFile(tmp, "w", compression, compresslevel=level)
             with zf:
-                # 先写目录条目（external_attr 置 DOS 目录位，保证空目录也进包）
-                for arcname, rpath in dirs:
-                    try:
-                        st = os.stat(rpath)
-                        zinfo = zipfile.ZipInfo(arcname.rstrip("/") + "/")
-                        zinfo.date_time = time.localtime(st.st_mtime)[:6]
-                        zinfo.external_attr = 0x10  # DOS 目录属性位
-                        zf.writestr(zinfo, b"")
-                    except Exception:  # noqa: BLE001
-                        pass  # 目录条目写失败不致命，文件条目继续
-                # 再写文件（预检通过后若仍失败，跳过并记录）
-                for arcname, rpath in ok_files:
-                    try:
-                        zf.write(rpath, arcname)
-                    except Exception as exc:  # noqa: BLE001
-                        skipped.append({"path": rpath, "reason": "写入失败: %s" % exc})
+                _write_zip_entries(zf, plan, dirs, task=None, skipped=skipped)
             name = "打包下载_%d.zip" % int(datetime.datetime.now().timestamp())
             handler.send_response(200)
             handler.send_header("Content-Type", "application/octet-stream")
@@ -3511,6 +3669,311 @@ def _stream_archive(handler, items, mode="normal"):
                 pass
     finally:
         _ARCHIVE_SEM.release()
+
+
+def _archive_tmp_path(task_id):
+    """后台任务 zip 的固定临时路径（可预测，供启动清扫与断点下载）。"""
+    return os.path.join(tempfile.gettempdir(), "tk_%s.zip" % task_id)
+
+
+def _archive_rm_tmp(task_id):
+    """删除任务对应的临时 zip 文件（文件不存在时静默。"""
+    try:
+        os.unlink(_archive_tmp_path(task_id))
+    except OSError:
+        pass
+
+
+def _archive_delete_task(task):
+    """从任务表删除并清理其临时 zip 文件（调用方需保证表格访问线程安全）。"""
+    _ARCHIVE_TASKS.pop(task["task_id"], None)
+    _archive_rm_tmp(task["task_id"])
+
+
+def _archive_sweep_tmp():
+    """启动清扫：删除临时目录下历史遗留的 tk_*.zip（上次运行崩溃残留）。
+
+    命名可预测（tk_<task_id>.zip），glob 精确匹配，绝不误删其它程序的临时文件。
+    """
+    tdir = tempfile.gettempdir()
+    try:
+        for name in os.listdir(tdir):
+            if name.startswith("tk_") and name.endswith(".zip"):
+                try:
+                    os.unlink(os.path.join(tdir, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _archive_new_task(paths, mode):
+    """创建后台打包任务并启动工人线程；返回 (task, None) 或 (None, err)。
+
+    paths: 源路径列表（dict 去重保序）；mode: store|fast|normal（非法回退 normal）。
+    排队上限：queued+scanning+compressing ≥ _ARCHIVE_QUEUE_MAX 时拒绝（429 由路由处理）。
+    """
+    _archive_poll_cleanup()
+    # 校验：去重保序 + 存在性过滤（不存在的路径记入 skipped，不终止整体）
+    abs_paths = []
+    for p in paths or []:
+        if not isinstance(p, str) or not p.strip():
+            continue
+        try:
+            ap = os.path.realpath(p.strip())
+        except Exception:  # noqa: BLE001
+            ap = p.strip()
+        if ap not in abs_paths:
+            abs_paths.append(ap)
+    if not abs_paths:
+        return (None, {"error": "没有可打包的文件"})
+    not_exist = []
+    existing = []
+    for p in abs_paths:
+        if os.path.exists(p):
+            existing.append(p)
+        else:
+            not_exist.append({"path": p, "reason": "路径不存在或无法访问"})
+    if not existing:
+        return (None, {"error": "没有可打包的文件"})
+    with _ARCHIVE_TASKS_LOCK:
+        active = sum(1 for t in _ARCHIVE_TASKS.values()
+                     if t["state"] in ("queued", "scanning", "compressing"))
+        if active >= _ARCHIVE_QUEUE_MAX:
+            return (None, {"error": "打包任务过多，请稍后再试", "queue_full": True})
+        task_id = uuid.uuid4().hex[:12]
+        names = []
+        for p in existing:
+            base = os.path.basename(p.rstrip("\\/"))
+            names.append(base or p)
+        task = {
+            "task_id": task_id,
+            "paths": existing,
+            "names": names,
+            "mode": mode if mode in _ARCHIVE_MODES else "normal",
+            "state": "queued",
+            "created_at": time.time(),
+            "total_bytes": 0,
+            "done_bytes": 0,
+            "current_file": "",
+            "file_total": 0,
+            "file_done": 0,
+            "skipped": not_exist,
+            "error": None,
+            "temp": None,
+            "dl_total_bytes": 0,
+            "bytes_sent": 0,
+            "cancel_evt": threading.Event(),
+            "lock": threading.RLock(),
+        }
+        _ARCHIVE_TASKS[task_id] = task
+        threading.Thread(target=_archive_worker, args=(task,), daemon=True).start()
+    return (task, None)
+
+
+def _archive_worker(task):
+    """后台打包工人：排队→扫描→压缩→就绪；退出时必 release 信号量。
+
+    状态机：queued→scanning→compressing→ready；取消→aborted；异常→failed。
+    扫描阶段发现的跳过项并入创建的 skipped 清单；压缩前的临时盘空间预检也在此。
+    """
+    tmp = None
+    try:
+        # 信号量即排队（同时最多 2 个压缩进行中，与 /dlzip 同步打包共享额度）
+        _ARCHIVE_SEM.acquire()
+        task["state"] = "scanning"
+        items = _build_archive_items(task["paths"])
+        plan, dirs, total, skipped = _scan_plan(items)
+        task["total_bytes"] = total
+        # 创建时的不存在路径跳过项保留在前，扫描发现的跳过项追加在后
+        task["skipped"] = list(task["skipped"]) + skipped
+        # 一个文件都没打成且没有任何目录条目 → 视为失败
+        if not plan and not dirs:
+            raise RuntimeError("所有选中项均无法读取")
+        if task["cancel_evt"].is_set():
+            raise _ArchiveAborted()
+        # 临时盘剩余空间预检（与同步打包同一文案）
+        try:
+            tmp_drive = os.path.splitdrive(tempfile.gettempdir())[0] + os.sep
+            if total > shutil.disk_usage(tmp_drive).free:
+                raise RuntimeError(
+                    "临时空间不足，本次打包需要约 %d MB 可用空间" % (total // (1024 * 1024)))
+        except OSError:
+            pass  # disk_usage 失败不阻塞打包
+        task["state"] = "compressing"
+        # 先 mkstemp 占名再 unlink，让 ZipFile 自建全新文件；
+        # 压缩完成后 rename 到固定 tk_<task_id>.zip（可预测名字，供下载与清扫）
+        fd, tmp = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        compression, level = _ARCHIVE_MODES.get(task["mode"], _ARCHIVE_MODES["normal"])
+        if level is None:
+            zf = zipfile.ZipFile(tmp, "w", compression)
+        else:
+            zf = zipfile.ZipFile(tmp, "w", compression, compresslevel=level)
+        with zf:
+            _write_zip_entries(zf, plan, dirs, task=task, skipped=task["skipped"])
+        task["state"] = "ready"
+        task["dl_total_bytes"] = os.path.getsize(tmp)
+        tk_path = _archive_tmp_path(task["task_id"])
+        os.rename(tmp, tk_path)
+        tmp = None  # 已挪位，finally 不再清理
+        task["temp"] = tk_path
+    except _ArchiveAborted:
+        task["state"] = "aborted"
+        task["error"] = None
+    except Exception as exc:  # noqa: BLE001
+        task["state"] = "failed"
+        task["error"] = str(exc)
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        _ARCHIVE_SEM.release()
+
+
+def _archive_task_light(task, full=False):
+    """轻量任务快照（轮询用，不含重字段；full 时带完整 skipped 清单）。"""
+    snap = {
+        "task_id": task["task_id"],
+        "state": task["state"],
+        "mode": task["mode"],
+        "names": list(task["names"]),
+        "total_bytes": task["total_bytes"],
+        "done_bytes": task["done_bytes"],
+        "current_file": task["current_file"],
+        "file_total": task["file_total"],
+        "file_done": task["file_done"],
+        "skipped_count": len(task["skipped"]),
+        "error": task["error"],
+        "dl_total_bytes": task["dl_total_bytes"],
+        "bytes_sent": task["bytes_sent"],
+        "created_at": task["created_at"],
+    }
+    if full:
+        snap["skipped"] = list(task["skipped"])
+    return snap
+
+
+def _archive_poll_cleanup():
+    """惰性清理任务表：TTL 过期任务删除/取消 + 超上限逐出最旧终态。
+
+    TTL：任何状态的 created_at 超 30 分钟（终态直接删除，active 置取消事件）；
+    上限 _ARCHIVE_TASK_CAP：超限逐出最旧终态（活任务不強杀）。
+    在 /api/archives 与创建任务时调用，无后台守护线程。
+    """
+    with _ARCHIVE_TASKS_LOCK:
+        now = time.time()
+        stale = [t for t in _ARCHIVE_TASKS.values()
+                 if now - t["created_at"] > _ARCHIVE_TASK_TTL]
+        for t in stale:
+            if t["state"] in ("queued", "scanning", "compressing", "downloading"):
+                # 活任务：置取消事件（工人/下载循环会收敛并自清），任务随后移除
+                t["cancel_evt"].set()
+                _archive_delete_task(t)
+            else:
+                _archive_delete_task(t)
+        # 超上限：逐出最旧终态（ready/done/failed/aborted/downloading 都算终态可逐出）
+        while len(_ARCHIVE_TASKS) > _ARCHIVE_TASK_CAP:
+            finals = [t for t in _ARCHIVE_TASKS.values()
+                      if t["state"] in ("ready", "done", "failed", "aborted", "downloading")]
+            if not finals:
+                break
+            oldest = min(finals, key=lambda t: t["created_at"])
+            _archive_delete_task(oldest)
+
+
+def _archive_preview(path):
+    """打包预览单路径：文件 → {name,is_dir:false,size}；目录 → 行 + 子项统计。
+
+    目录统计 child_count（子项数）与 child_bytes（首层文件大小和）；
+    目录权限失败时 child_count=-1 由前端提示。
+    """
+    if os.path.isfile(path):
+        return {"name": os.path.basename(path) or path, "is_dir": False,
+                "size": os.path.getsize(path)}
+    if os.path.isdir(path):
+        item = {"name": os.path.basename(path) or path, "is_dir": True,
+                "size": None, "child_count": 0, "child_bytes": 0}
+        try:
+            with os.scandir(path) as it:
+                for e in it:
+                    item["child_count"] += 1
+                    try:
+                        if e.is_dir(follow_symlinks=False):
+                            continue
+                        item["child_bytes"] += e.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        pass
+        except OSError:
+            item["child_count"] = -1  # 权限失败：前端按"统计失败"提示
+        return item
+    return None
+
+
+def _archive_dl(handler, task):
+    """流式投递打包好的 zip（原生下载，无 Blob）：ready/done → 流完成 → done。
+
+    下载中断（断连）→ 回滚 ready 可再下载；用户取消（cancel_evt）→ 任务直接删除。
+    状态登记 downloading 期间其他请求不会重复投递。
+    """
+    with task["lock"]:
+        if task["state"] not in ("ready", "done"):
+            handler._send_json({"error": "压缩尚未完成"}, 409)
+            return
+        task["state"] = "downloading"
+        task["bytes_sent"] = 0
+        fsize = task["dl_total_bytes"]
+        if fsize <= 0:
+            try:
+                fsize = os.path.getsize(_archive_tmp_path(task["task_id"]))
+            except OSError:
+                handler._send_json({"error": "压缩包不存在"}, 404)
+                return
+    name = "打包下载_%d.zip" % int(datetime.datetime.now().timestamp())
+    try:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Length", str(fsize))
+        handler.send_header(
+            "Content-Disposition",
+            "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
+        )
+        handler.send_header("X-Archive-Format", "zip")
+        handler.end_headers()
+        sent = 0
+        last_report = 0
+        with open(_archive_tmp_path(task["task_id"]), "rb") as fh:
+            while True:
+                if task["cancel_evt"].is_set():
+                    raise _ArchiveAborted()
+                chunk = fh.read(_ARCHIVE_CHUNK)
+                if not chunk:
+                    break
+                handler.wfile.write(chunk)
+                sent += len(chunk)
+                # 每 4MB 更新一次 bytes_sent（供前端下载进度）
+                if sent - last_report >= 4 * _ARCHIVE_CHUNK:
+                    task["bytes_sent"] = sent
+                    last_report = sent
+        with task["lock"]:
+            task["bytes_sent"] = sent
+            task["state"] = "done"
+    except _ArchiveAborted:
+        # 用户主动取消下载：任务直接删除（响应已开始，连接由浏览器关闭承继）
+        with task["lock"]:
+            _archive_delete_task(task)
+    except Exception:  # noqa: BLE001
+        # 前端断连等写流异常：回滚 ready 可再下载，bytes_sent 清零；
+        # 此时 wfile 已断，无法再写任何响应
+        with task["lock"]:
+            task["state"] = "ready"
+            task["bytes_sent"] = 0
 
 
 _CERT_CN = "transfer.local"
@@ -3677,6 +4140,8 @@ def _remove_firewall_rule(port):
 
 
 def _start(root, port, token=None):
+    # 启动清扫：删除临时目录下历史遗留的后台打包 zip（tk_*.zip 崩溃残留）
+    _archive_sweep_tmp()
     if root and root.strip().lower() not in ("auto", "all"):
         roots = [os.path.abspath(os.path.expanduser(root))]
         for r in roots:
