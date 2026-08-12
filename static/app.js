@@ -2481,7 +2481,6 @@ function entrySearchText(e) {
 // ============================================================================
 const TAG_BATCH = 20;      // 每批处理文件数（分批让出主线程，避免卡列表渲染）
 const TAG_TOP_N = 10;      // 推荐标签个数
-const TAG_WEIGHT = 2;      // 元数据 tags 完整标签的权重（高于文件名 bigram 的 1）
 const TAG_MIN_LEN = 2;     // 词条长度下限
 const TAG_MAX_LEN = 20;    // 词条长度上限
 // 常见文件扩展名不做标签（文件名结构性后缀，避免 mp4/mkv 之类霸榜）
@@ -2506,16 +2505,16 @@ function isTagNoiseWord(w) {
 }
 // 【可复用接口（供标签推荐/后续模糊匹配共用）】文本→关键词条：
 //  - texts: 归一化文本数组（文件名/标题/作者/备注等）
-//  - tags: 元数据完整标签数组（整体作为独立词条、权重 TAG_WEIGHT，不做 n-gram）
-//  - 返回 Map<词, 权重>：同一文件内同名词只保留最高权重（文件级去重，外层按"出现文件数"计分）
+//  - tags: 元数据完整标签数组（整体作为独立词条、不做 n-gram）
+//  - 返回 Map<词, 1>：词条权重统一为 1（文件内去重，同词只记 1 次），
+//    外层按"出现该词的文件数"计分——每个文件对某标签最多贡献 1
 function extractKeywords(texts, tags) {
   const map = new Map();
-  const add = (w, wgt) => {
+  const add = (w) => {
     if (w.length < TAG_MIN_LEN || w.length > TAG_MAX_LEN) return;
     if (STOPWORDS.has(w)) return;
     if (isTagNoiseWord(w)) return;
-    const prev = map.get(w);
-    if (!prev || wgt > prev) map.set(w, wgt);
+    if (!map.has(w)) map.set(w, 1); // 文件内去重：同词在该文件只保留 1 次
   };
   (texts || []).forEach(t => {
     splitChunks(String(t)).forEach(chunk => {
@@ -2525,17 +2524,17 @@ function extractKeywords(texts, tags) {
           const g = chunk.slice(i, i + 2);
           if (seen.has(g)) continue;
           seen.add(g);
-          add(g, 1);
+          add(g);
         }
       } else {
-        add(chunk, 1); // 英文/数字整词保留（长度≥2）
+        add(chunk); // 英文/数字整词保留（长度≥2）
       }
     });
   });
-  (tags || []).forEach(t => { if (t) add(String(t), TAG_WEIGHT); });
+  (tags || []).forEach(t => { if (t) add(String(t)); }); // tags 完整标签整体作为词条，不加权
   return map;
 }
-// 收集单个 entry 的标签文本源：文件名+标题+作者+备注（tags 单独走完整词条权重）
+// 收集单个 entry 的标签文本源：文件名+标题+作者+备注（tags 单独走完整词条）
 function entryTagTexts(e) {
   const m = e.meta || {};
   const texts = [e.name, m.title, m.author];
@@ -2548,7 +2547,7 @@ function entryTagTexts(e) {
 let _tagScanToken = 0;     // 扫描令牌：重新扫描/目录切换时递增，使旧扫描的后续批次失效
 let _tagScanState = null;  // 进行中的扫描 { token, path, st, idx }
 let _tagScanTimer = null;
-const _tagCache = new Map(); // path -> { scores: Map<词,加权文件数>, done, total, complete }
+const _tagCache = new Map(); // path -> { scores: Map<词, 出现文件数>, done, total, complete }
 function tagScanReset() {
   _tagScanToken++;
   if (_tagScanTimer) { clearTimeout(_tagScanTimer); _tagScanTimer = null; }
@@ -2579,7 +2578,7 @@ function tagScanStep(token) {
     if (!e) continue;
     const { texts, tags } = entryTagTexts(e);
     extractKeywords(texts.map(normSearch), tags.map(normSearch)).forEach((wgt, w) => {
-      st.scores.set(w, (st.scores.get(w) || 0) + wgt); // score=出现该词的加权文件数（文件级去重已由 extractKeywords 保证）
+      st.scores.set(w, (st.scores.get(w) || 0) + wgt); // score=出现该词的文件数（文件级去重已由 extractKeywords 保证，每文件最多贡献 1）
     });
   }
   st.done = end;
@@ -2612,7 +2611,7 @@ function tagRenderTop(st) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "tag-chip";
-    b.title = "点击加入搜索 · 推荐度 " + t.score;
+    b.title = "点击加入搜索 · 出现于 " + t.score + " 个文件";
     b.innerHTML = esc(t.word) + '<span class="score">' + t.score + "</span>";
     b.onclick = ev => tagApplyTag(ev, t.word);
     box.appendChild(b);
