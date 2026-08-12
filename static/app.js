@@ -2638,6 +2638,13 @@ function tagApplyTag(ev, word) {
   const curVal = input.value.trim();
   input.value = curVal ? curVal + " " + word : word;
   searchQuery = input.value;
+  // 推荐标签来自元数据内容统计，点击标签时应自动开启"深度查找"（文件名+元数据搜索），
+  // 否则标签若只出现在元数据里、文件名不含时，精确子串阶段会查不到结果。
+  if (!$("searchMetaToggle").checked) {
+    $("searchMetaToggle").checked = true;
+    searchMetaMode = true;
+    $("searchInput").placeholder = searchMetaMode ? "按文件名或元数据搜索…" : "按文件名搜索…";
+  }
   renderEntries();
   if (ev && ev.currentTarget) {
     const el = ev.currentTarget;
