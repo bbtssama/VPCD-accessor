@@ -1301,28 +1301,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self._send_json({"saved": saved, "errors": errors, "dir": target})
 
     def handle_one_request(self):  # noqa: D401
-        # HTTP 明文端口（8444）若收到 TLS ClientHello（客户端误用 https:// 访问
-        # http 端口、或浏览器自动升级 HTTPS），标准解析会把二进制当请求行，
-        # 刷出大量 400 乱码日志。这里识别 TLS 记录头后返回友好提示并关闭连接。
-        try:
-            head = self.rfile.peek(2)
-        except Exception:  # noqa: BLE001
-            head = b""
-        if head[:2] == b"\x16\x03":
-            self.close_connection = True
-            body = ("这是 HTTP 明文端口（免证书），请使用 http:// 访问；"
-                    "TLS 加密请访问 8443 端口。").encode("utf-8")
-            self.requestline = "TLS handshake to HTTP port"  # 供 log_request 使用
-            self.request_version = "HTTP/1.1"
-            self.command = "TLS"
-            self.send_response(400, "TLS handshake sent to HTTP plaintext port")
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.wfile.write(body)
-            self.log_message("TLS handshake sent to HTTP plaintext port, ignored")
-            return
+        # 单端口模式下 TLS 连接已在 get_request 层完成包装，这里只收到
+        # 解密后的明文数据，直接交给父类处理即可。
         super().handle_one_request()
 
     def log_message(self, fmt, *args):  # noqa: A003
@@ -1337,11 +1317,42 @@ class _DriveServer(ThreadingHTTPServer):
     # bind 直接抛 OSError，新实例明确失败退出，避免多实例并存。
     allow_reuse_address = False
 
-    def __init__(self, addr, handler, roots, token):
+    def __init__(self, addr, handler, roots, token, ssl_context=None):
         self.roots = roots
         self.token = token
         self.pinned = []
+        self.ssl_context = ssl_context
         super().__init__(addr, handler)
+
+    def get_request(self):
+        """首字节嗅探实现单端口双协议：TLS ClientHello 首字节恒为 0x16，
+        HTTP 明文请求首字节是 ASCII 方法字母（G/P/H/O 等），据此决定是否
+        用 SSLContext 包装该连接。0x16 不属于可打印 ASCII，不会误判明文。
+        """
+        sock, addr = super().get_request()
+        if self.ssl_context is not None:
+            try:
+                sock.settimeout(1.0)
+                try:
+                    peek = sock.recv(1, socket.MSG_PEEK)
+                finally:
+                    sock.settimeout(None)
+            except OSError:
+                peek = b""  # peek 异常/无数据按明文处理
+            if peek == b"\x16":
+                try:
+                    sock.settimeout(5.0)  # 防止半截 ClientHello 无限阻塞握手
+                    sock = self.ssl_context.wrap_socket(sock, server_side=True)
+                    sock.settimeout(None)
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    # SSLError 属 OSError：_handle_request_noblock 会捕获并
+                    # 干净跳过该请求，不会影响服务器主循环
+                    raise OSError("TLS 握手失败，关闭连接: %s" % exc) from exc
+        return sock, addr
 
     def server_bind(self):
         # 双栈：关闭 IPV6_V6ONLY，使 [::] 监听同时接受 IPv4-mapped 连接
@@ -3396,10 +3407,9 @@ def _urls(port, token):
 
 
 def _urls_http(port, token):
-    """HTTP 免证书双监听端口（port+1）的访问 URL 列表。"""
-    hp = port + 1
-    urls = ["http://[%s]:%d/%s/" % (ip, hp, token) for ip in _public_ipv6()]
-    urls.append("http://127.0.0.1:%d/%s/" % (hp, token))
+    """HTTP 明文访问 URL（与 HTTPS 同一端口，首字节嗅探自动识别协议）。"""
+    urls = ["http://[%s]:%d/%s/" % (ip, port, token) for ip in _public_ipv6()]
+    urls.append("http://127.0.0.1:%d/%s/" % (port, token))
     return urls
 
 
@@ -3455,32 +3465,19 @@ def _start(root, port, token=None):
     ctx.load_cert_chain(CERT_FILE, KEY_FILE)
     try:
         handler = partial(_DriveHandler)
-        server = _DriveServer(("::", port), handler, roots, token)
+        server = _DriveServer(("::", port), handler, roots, token, ssl_context=ctx)
     except OSError as exc:
         raise ToolError("启动失败（端口被占用或无权限）: %s" % exc) from exc
-    server.socket = ctx.wrap_socket(server.socket, server_side=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    # 纯 HTTP 双监听（port+1，免证书）：手机打不开自签名证书页面时可直接用 http://
-    http_server = None
-    http_port = port + 1
-    try:
-        http_server = _DriveServer(("::", http_port), handler, roots, token)
-        threading.Thread(target=http_server.serve_forever, daemon=True).start()
-    except OSError:
-        http_server = None  # http 端口被占则降级，不影响 https 主服务
 
     # 转码会话空闲自动终止（60s 无请求回收进程，避免常驻 ffmpeg 堆积）
     threading.Thread(target=_trans_sweep_loop, daemon=True).start()
     # 转码缓存磁盘治理（超 2GB 按 mtime 清理最旧文件）
     threading.Thread(target=_cache_sweep_loop, daemon=True).start()
 
-    _state.update(server=server, http_server=http_server, roots=roots, port=port,
-                  http_port=http_port if http_server else None,
+    _state.update(server=server, roots=roots, port=port,
                   token=token, pinned=server.pinned)
     fw = _add_firewall_rule(port)
-    fw_http = _add_firewall_rule(http_port) if http_server else None
-    urls_http = _urls_http(port, token) if http_server else []
     hint = (
         "手机浏览器打开第一个 IPv6 URL 即可浏览/下载/上传；证书提示选择\"继续访问\"。"
         "手机若打不开 https 证书页面，请用 http:// 地址（免证书，仅限本机/局域网使用）。"
@@ -3489,8 +3486,6 @@ def _start(root, port, token=None):
     )
     if not fw.get("ok"):
         hint += " 注意：防火墙规则未添加（" + fw.get("error", "") + "），" + fw.get("fix", "")
-    if fw_http is not None and not fw_http.get("ok"):
-        hint += " 注意：HTTP 端口防火墙规则未添加（" + fw_http.get("error", "") + "），" + fw_http.get("fix", "")
     return {
         "running": True,
         "roots": roots,
@@ -3498,8 +3493,7 @@ def _start(root, port, token=None):
         "token": token,
         "archive_format": "rar" if _find_winrar() else "zip",
         "urls": _urls(port, token),
-        "urls_http": urls_http,
-        "http_port": http_port if http_server else None,
+        "urls_http": _urls_http(port, token),
         "firewall_rule": fw,
         "hint": hint,
     }
@@ -3511,17 +3505,8 @@ def _stop():
     port = _state["port"]
     _state["server"].shutdown()
     _state["server"].server_close()
-    http_server = _state.get("http_server")
-    if http_server is not None:
-        try:
-            http_server.shutdown()
-            http_server.server_close()
-        except Exception:  # noqa: BLE001
-            pass
-    _state.update(server=None, http_server=None, roots=[], port=None, http_port=None,
-                  token=None, pinned=[])
+    _state.update(server=None, roots=[], port=None, token=None, pinned=[])
     _remove_firewall_rule(port)
-    _remove_firewall_rule(port + 1)
     return {"stopped": True, "port": port}
 
 
@@ -3641,6 +3626,7 @@ def drive_status() -> dict:
         "pinned": list(_state["pinned"]),
         "archive_format": "rar" if _find_winrar() else "zip",
         "urls": _urls(_state["port"], _state["token"]),
+        "urls_http": _urls_http(_state["port"], _state["token"]),
     }
 
 
@@ -3673,7 +3659,7 @@ def _cli_serve(root, port, token=None):
     for u in info["urls"]:
         print(u)
     for u in info.get("urls_http") or []:
-        print(u + "  (HTTP 免证书明文，仅限可信局域网使用；手机打不开 https 证书页时用这个)")
+        print(u + "  (HTTP 免证书明文，与 HTTPS 同端口；手机打不开 https 证书页时把 https:// 改成 http://)")
     print("根目录: %s" % ", ".join(info["roots"]))
     print("打包格式: %s" % info["archive_format"])
     print("按 Ctrl+C 停止服务")

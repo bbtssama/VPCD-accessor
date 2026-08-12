@@ -28,7 +28,7 @@
 ├── .mcp.json                  # Claude 插件 MCP 配置：python server/server.py（MCP 模式入口）
 ├── 启动网盘.bat                # Windows 启动脚本：探测 Python → 以 --serve auto 模式启动，崩溃 30s 自动重启
 ├── server/
-│   ├── server.py               # 主服务（3622 行）：HTTP 双端口 + MCP/CLI 双模式，全部核心逻辑
+│   ├── server.py               # 主服务（约 3700 行）：单端口（HTTPS/HTTP 自动识别）+ MCP/CLI 双模式，全部核心逻辑
 │   ├── mcp_stdio.py            # 零依赖 MCP stdio 框架（240 行）：JSON-RPC 2.0 行协议
 │   ├── templates/
 │   │   └── index.html          # 前端模板（213 行）：页面骨架 + 全部 CSS；每次请求实时读盘支持热更新
@@ -48,12 +48,12 @@
 ### 4.1 启动网盘.bat（网页模式）
 
 1. **Python 探测**（`启动网盘.bat:5-11`）：按顺序检查 `D:\ANACONDA\python.exe` → `C:\Users\user\AppData\Roaming\TRAE SOLO CN\...\python.exe` → `C:\Python312\python.exe` → `C:\Python311\python.exe` → 兜底用系统 `python`（可能是 WindowsApps 占位符 stub，无法运行）。
-2. **启动命令**（`启动网盘.bat:15`）：`server.py --serve auto --port 8443 --token transfer`，即 CLI 模式：根目录 `auto`（全部固定磁盘）、HTTPS 端口 8443、固定 token `transfer`（重启后链接不变）。
+2. **启动命令**（`启动网盘.bat:15`）：`server.py --serve auto --port 8443 --token transfer`，即 CLI 模式：根目录 `auto`（全部固定磁盘）、端口 8443（**该端口同时服务 HTTPS 与 HTTP 明文，首字节嗅探自动识别**）、固定 token `transfer`（重启后链接不变）。
 3. **崩溃自动重启**（`启动网盘.bat:13-20`）：服务的每次退出（含崩溃）都会在 30 秒后自动重启，形成一个 `:loop` 循环；关闭窗口即彻底停止。
 
 ### 4.2 CLI 直接启动
 
-`python server/server.py --serve [根目录|auto] --port <端口> --token <token>`（参数解析见 `server.py:3611-3622`）。启动后打印 HTTPS 访问 URL（IPv6 + 127.0.0.1）、HTTP 免证书 URL（端口+1）、根目录与打包格式，Ctrl+C 停止。`--serve` 缺省值 `auto` = 整机所有固定磁盘；也可传单个根目录（如 `D:\资料`）。
+`python server/server.py --serve [根目录|auto] --port <端口> --token <token>`（参数解析见 `server.py:3611-3622`）。启动后打印 HTTPS 访问 URL（IPv6 + 127.0.0.1）、HTTP 免证书 URL（**与 HTTPS 同一端口**）、根目录与打包格式，Ctrl+C 停止。`--serve` 缺省值 `auto` = 整机所有固定磁盘；也可传单个根目录（如 `D:\资料`）。
 
 ### 4.3 MCP 模式（AI 客户端）
 
@@ -70,7 +70,7 @@
 
 ### 5.1 核心类
 
-- **`_DriveServer(ThreadingHTTPServer)`**（`server.py:1306`）：`AF_INET6` 地址族 + 关闭 `IPV6_V6ONLY`（`server_bind`，`server.py:1316-1323`）实现**双栈监听**——`[::]` 同时接受 IPv4-mapped 连接，手机/本机 IPv4 均可达；`daemon_threads=True`。持有 `roots`（允许根目录列表）、`token`、`pinned`（置顶列表）。
+- **`_DriveServer(ThreadingHTTPServer)`**（`server.py:1306`）：`AF_INET6` 地址族 + 关闭 `IPV6_V6ONLY`（`server_bind`，`server.py:1316-1323`）实现**双栈监听**——`[::]` 同时接受 IPv4-mapped 连接，手机/本机 IPv4 均可达；`daemon_threads=True`。持有 `roots`（允许根目录列表）、`token`、`pinned`（置顶列表）、`ssl_context`。**重写 `get_request` 做首字节嗅探**：accept 后 peek 首字节，`0x16`（TLS ClientHello）则 `wrap_socket` 走 HTTPS，否则按明文 HTTP 处理——单端口 8443 同时服务 HTTPS 与 HTTP（`server.py:1350-1374`）。
 - **`_DriveHandler(BaseHTTPRequestHandler)`**（`server.py:116`）：`protocol_version = "HTTP/1.1"`（便于 `<video>` 复用连接做 Range 分片）。核心方法：
   - `_send_json` / `_send_html` / `_send_error_page`（`server.py:122/131/175`）：统一响应封装；错误页为友好 HTML（403）
   - `_send_static`（`server.py:140`）：静态资源服务，**白名单 + basename 双重校验**（详见第 10 节）
@@ -90,7 +90,7 @@
 - **打包**：`_find_winrar`（`server.py:1462`）/ `_find_unrar`（`server.py:1480`）多路径探测（支持 `WINRAR_PATH`/`UNRAR_PATH` 环境变量）；`_stream_archive`（`server.py:3105`）WinRAR 出 `.rar` 否则 zipfile 出 `.zip`；`_stream_archive_virtual`（`server.py:3162`）虚拟分享打包（同名复用文件写 `.lnk` 文本条目）。
 - **解压**：`_unpack_list`（`server.py:2991`）zip 用 zipfile、rar 用 `UnRAR lb -p-`（GBK 输出）；`_unpack_download`（`server.py:3056`）zip 流式、rar 由 `UnRAR p` 输出。
 - **防火墙**：`_add_firewall_rule`（`server.py:3330`）netsh 添加入站规则 `TransferMCP-<port>`，失败返回含修复命令的提示；`_remove_firewall_rule`（`server.py:3354`）停止时删除。
-- **URL 生成**：`_public_ipv6`（`server.py:3302`）找非链路本地非 ULA 的 IPv6；`_urls`（`server.py:3316`）HTTPS 链接、`_urls_http`（`server.py:3322`）HTTP 免证书链接（**端口 = HTTPS 端口 + 1**）。
+- **URL 生成**：`_public_ipv6`（`server.py:3302`）找非链路本地非 ULA 的 IPv6；`_urls`（`server.py:3316`）HTTPS 链接、`_urls_http`（`server.py:3322`）HTTP 免证书链接（**与 HTTPS 同一端口**）。
 - **证书**：`_ensure_cert`（`server.py:3247`）不存在时生成 let's-encrypt 风格自签名证书（CN/SAN=`drive.local`，RSA-2048，有效期 7 天，SHA256）；`_cert_p12_bytes`（`server.py:3285`）打包 PKCS#12（密码 `1234`，`server.py:3282`，小米等 Android 装 CA 必需）。
 - **MCP 工具**：`drive_start/drive_pin/drive_status/drive_stop`（`server.py:3475-3578`），`_under`（`server.py:3581`）做根目录包含校验。
 
@@ -114,8 +114,7 @@
 
 | 线程 | 启动处 | 周期 | 职责 |
 |---|---|---|---|
-| HTTPS 服务 `serve_forever` | `_start` `server.py:3386` | 常驻 | 8443 |
-| HTTP 服务 `serve_forever` | `_start` `server.py:3393` | 常驻 | 8444（被占则降级跳过，不影响 HTTPS） |
+| HTTPS/HTTP 服务 `serve_forever` | `_start` `server.py:3386` | 常驻 | 8443（单端口，首字节嗅探自动识别 TLS/明文） |
 | `_trans_sweep_loop` | `_start` `server.py:3398` | 5s | 回收空闲转码会话 |
 | `_cache_sweep_loop` | `_start` `server.py:3400` | 600s | 转码缓存磁盘治理 |
 
@@ -220,7 +219,7 @@
 | 常量 | 值 | 位置 |
 |---|---|---|
 | `VERSION` | "3.0.0" | `server.py:55` |
-| `DEFAULT_PORT` | 8443（HTTP 免证书端口 = port+1 = 8444） | `server.py:56` |
+| `DEFAULT_PORT` | 8443（HTTPS 与 HTTP 明文同端口，首字节嗅探自动识别） | `server.py:56` |
 | `CERT_DIR` / 证书/私钥 | `~/.transfer-mcp/` / server.crt / server.key | `server.py:57-59` |
 | `FFPROBE` / `FFMPEG` | `C:\Users\user\ffmpeg\bin\ffprobe.exe` / 同目录 ffmpeg.exe | `server.py:70-72` |
 | `TRANSCACHE_DIR` | `~/.transfer-mcp/transcache` | `server.py:75` |
@@ -245,7 +244,7 @@
 - **路径越界校验**：`_resolve`（`server.py:283`）用 `realpath + commonpath` 保证请求路径必在 roots 内（防符号链接逃逸）；分享用 `_resolve_share_path`（`server.py:302`），多文件分享是**白名单精确匹配**而非前缀匹配——父目录路径访问未分享文件会被拒绝。
 - **静态资源白名单**：`_send_static`（`server.py:140`）只允许顶层 5 个指定文件与 `icons/*.svg`，basename + 无斜杠双重校验，杜绝路径穿越。
 - **`cgi` 模块弃用警告**：`server.py:20` 导入 `cgi`（Python 3.13 起弃用，3.15 移除），上传用 `cgi.FieldStorage` 解析 multipart（`server.py:1278`）；未来需替换为手写 multipart 解析。
-- **HTTP 明文端口（8444）**：仅用于手机打不开自签名证书页面时的局域网兜底，明文传输，仅限可信网络（启动提示已注明）。
+- **HTTP 明文（同上端口 8443）**：仅用于手机打不开自签名证书页面时的局域网兜底，明文传输，仅限可信网络（启动提示已注明）；服务端靠首字节嗅探区分 TLS/明文，`http://` 与 `https://` 均可访问同一端口。
 - **只读为主 + 上传**：服务不能删除/修改服务器端已有文件，只能上传到当前目录；分享模式连上传也禁用。
 - **权限受限目录**：无权限目录返回 403 且前端提示"返回上级"；浏览受系统保护目录需以管理员身份运行。
 - **firewall 规则**：添加入站规则需要管理员权限，失败时启动输出会给出手工执行命令（`server.py:3330-3351`）。
