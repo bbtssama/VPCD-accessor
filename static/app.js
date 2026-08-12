@@ -1,5 +1,865 @@
 // 由 server.py 拆分而来：电脑网盘主前端逻辑
 "use strict";
+// ===== 推荐标签：中文停用词表（来源 https://github.com/goto456/stopwords/blob/master/cn_stopwords.txt）+ 基础英文停用词 =====
+const STOPWORDS = new Set([
+  '！',
+  '$',
+  '，',
+  '、',
+  '。',
+  '：',
+  '；',
+  '?',
+  '？',
+  '_',
+  '“',
+  '”',
+  '《',
+  '》',
+  '0',
+  '1',
+  '2',
+  '3',
+  '4',
+  '5',
+  '6',
+  '7',
+  '8',
+  '9',
+  '阿',
+  '啊',
+  '哎',
+  '哎呀',
+  '哎哟',
+  '唉',
+  '嗳',
+  '俺',
+  '俺们',
+  '按',
+  '按照',
+  '巴',
+  '巴巴',
+  '把',
+  '罢了',
+  '吧',
+  '吧哒',
+  '般的',
+  '被',
+  '呗',
+  '本',
+  '本地',
+  '本人',
+  '本身',
+  '本着',
+  '比',
+  '比方',
+  '比及',
+  '比如',
+  '彼',
+  '彼此',
+  '彼时',
+  '鄙人',
+  '边',
+  '便于',
+  '别',
+  '别处',
+  '别的',
+  '别管',
+  '别人',
+  '别是',
+  '别说',
+  '并',
+  '并非',
+  '并且',
+  '不',
+  '不比',
+  '不成',
+  '不单',
+  '不但',
+  '不得',
+  '不独',
+  '不妨',
+  '不管',
+  '不光',
+  '不过',
+  '不仅',
+  '不尽',
+  '不尽然',
+  '不拘',
+  '不料',
+  '不论',
+  '不怕',
+  '不然',
+  '不如',
+  '不若',
+  '不是',
+  '不特',
+  '不外乎',
+  '不惟',
+  '不问',
+  '不只',
+  '不至于',
+  '才',
+  '才能',
+  '曾',
+  '朝',
+  '朝着',
+  '趁',
+  '趁着',
+  '诚然',
+  '诚如',
+  '乘',
+  '冲',
+  '出来',
+  '出于',
+  '除',
+  '除此之外',
+  '除非',
+  '除开',
+  '除了',
+  '除外',
+  '处在',
+  '此',
+  '此处',
+  '此次',
+  '此地',
+  '此间',
+  '此时',
+  '此外',
+  '从',
+  '从此',
+  '从而',
+  '啐',
+  '打',
+  '打从',
+  '大',
+  '大家',
+  '待',
+  '但',
+  '但凡',
+  '但是',
+  '当',
+  '当地',
+  '当然',
+  '当着',
+  '到',
+  '得',
+  '得了',
+  '地',
+  '的',
+  '的话',
+  '的确',
+  '等',
+  '等到',
+  '等等',
+  '第',
+  '叮咚',
+  '咚',
+  '都',
+  '对',
+  '对比',
+  '对待',
+  '对方',
+  '对于',
+  '多',
+  '多么',
+  '多少',
+  '呃',
+  '儿',
+  '而',
+  '而后',
+  '而况',
+  '而且',
+  '而是',
+  '而外',
+  '而言',
+  '而已',
+  '尔',
+  '尔尔',
+  '尔后',
+  '二来',
+  '凡',
+  '凡是',
+  '反而',
+  '反过来',
+  '反过来说',
+  '反之',
+  '非但',
+  '非独',
+  '非特',
+  '非徒',
+  '分别',
+  '否则',
+  '嘎',
+  '嘎登',
+  '该',
+  '赶',
+  '个',
+  '个别',
+  '各',
+  '各个',
+  '各位',
+  '各种',
+  '各自',
+  '给',
+  '根据',
+  '跟',
+  '固然',
+  '故',
+  '故此',
+  '故而',
+  '关于',
+  '管',
+  '光是',
+  '归',
+  '归齐',
+  '果然',
+  '果真',
+  '过',
+  '哈',
+  '哈哈',
+  '咳',
+  '还',
+  '还是',
+  '还要',
+  '还有',
+  '好',
+  '呵',
+  '呵呵',
+  '嗬',
+  '何',
+  '何处',
+  '何况',
+  '何时',
+  '何以',
+  '和',
+  '嘿',
+  '嘿嘿',
+  '很',
+  '哼',
+  '哼唷',
+  '后',
+  '后者',
+  '乎',
+  '呼哧',
+  '哗',
+  '换句话说',
+  '换言之',
+  '或',
+  '或是',
+  '或曰',
+  '或则',
+  '或者',
+  '基于',
+  '及',
+  '及其',
+  '及至',
+  '极了',
+  '即',
+  '即便',
+  '即或',
+  '即令',
+  '即如',
+  '即若',
+  '即使',
+  '几',
+  '几时',
+  '己',
+  '既',
+  '既然',
+  '既是',
+  '既往',
+  '继而',
+  '继后',
+  '继之',
+  '加以',
+  '加之',
+  '假如',
+  '假若',
+  '假使',
+  '兼之',
+  '简言之',
+  '鉴于',
+  '将',
+  '叫',
+  '较',
+  '较之',
+  '接着',
+  '结果',
+  '截至',
+  '介于',
+  '借',
+  '今',
+  '尽',
+  '尽管',
+  '尽管如此',
+  '紧接着',
+  '进而',
+  '经',
+  '经过',
+  '竟而',
+  '就',
+  '就是',
+  '就是了',
+  '就是说',
+  '就算',
+  '就要',
+  '具体地说',
+  '具体说来',
+  '据',
+  '据此',
+  '距',
+  '开始',
+  '开外',
+  '看',
+  '靠',
+  '可',
+  '可见',
+  '可是',
+  '可以',
+  '况且',
+  '啦',
+  '来',
+  '来说',
+  '来着',
+  '来自',
+  '赖以',
+  '啷当',
+  '了',
+  '类如',
+  '哩',
+  '离',
+  '例如',
+  '连',
+  '连同',
+  '两者',
+  '咧',
+  '临',
+  '另',
+  '另外',
+  '另悉',
+  '另一方面',
+  '喽',
+  '论',
+  '吗',
+  '嘛',
+  '漫说',
+  '慢说',
+  '冒',
+  '么',
+  '没奈何',
+  '每',
+  '每当',
+  '们',
+  '莫不然',
+  '莫如',
+  '莫若',
+  '某',
+  '某个',
+  '某某',
+  '某些',
+  '拿',
+  '哪',
+  '哪边',
+  '哪儿',
+  '哪个',
+  '哪里',
+  '哪年',
+  '哪怕',
+  '哪天',
+  '哪些',
+  '哪样',
+  '那',
+  '那般',
+  '那边',
+  '那儿',
+  '那个',
+  '那会儿',
+  '那里',
+  '那么',
+  '那么些',
+  '那么样',
+  '那时',
+  '那些',
+  '那样',
+  '乃',
+  '乃至',
+  '乃至于',
+  '难道说',
+  '呢',
+  '内',
+  '能',
+  '能否',
+  '嗯',
+  '你',
+  '你们',
+  '您',
+  '宁',
+  '宁可',
+  '宁肯',
+  '宁愿',
+  '喏',
+  '哦',
+  '呕',
+  '啪达',
+  '旁人',
+  '呸',
+  '譬如',
+  '譬喻',
+  '凭',
+  '凭借',
+  '其',
+  '其次',
+  '其二',
+  '其他',
+  '其它',
+  '其一',
+  '其余',
+  '其中',
+  '岂但',
+  '起',
+  '起见',
+  '恰恰相反',
+  '前此',
+  '前后',
+  '前者',
+  '且',
+  '且不说',
+  '且说',
+  '去',
+  '全部',
+  '全体',
+  '却',
+  '然而',
+  '然后',
+  '然则',
+  '让',
+  '人',
+  '人家',
+  '人们',
+  '任',
+  '任何',
+  '任凭',
+  '仍',
+  '仍旧',
+  '如',
+  '如此',
+  '如果',
+  '如何',
+  '如其',
+  '如若',
+  '如上',
+  '如上所述',
+  '如是',
+  '如同',
+  '如下',
+  '若',
+  '若非',
+  '若夫',
+  '若果',
+  '若是',
+  '啥',
+  '上',
+  '上下',
+  '尚且',
+  '设或',
+  '设若',
+  '设使',
+  '谁',
+  '谁料',
+  '谁人',
+  '谁知',
+  '什么',
+  '什么样',
+  '甚而',
+  '甚或',
+  '甚么',
+  '甚且',
+  '甚至',
+  '甚至于',
+  '省得',
+  '时候',
+  '使',
+  '使得',
+  '始而',
+  '似的',
+  '是',
+  '是的',
+  '是以',
+  '首先',
+  '受到',
+  '孰料',
+  '孰知',
+  '庶乎',
+  '庶几',
+  '顺',
+  '顺着',
+  '说来',
+  '虽',
+  '虽然',
+  '虽说',
+  '虽则',
+  '随',
+  '随后',
+  '随时',
+  '随着',
+  '所',
+  '所幸',
+  '所以',
+  '所有',
+  '所在',
+  '他',
+  '他们',
+  '他人',
+  '它',
+  '它们',
+  '她',
+  '她们',
+  '倘',
+  '倘或',
+  '倘然',
+  '倘若',
+  '倘使',
+  '傥然',
+  '腾',
+  '替',
+  '替代',
+  '通过',
+  '同',
+  '同时',
+  '哇',
+  '万一',
+  '往',
+  '望',
+  '唯有',
+  '惟其',
+  '为',
+  '为此',
+  '为何',
+  '为了',
+  '为什么',
+  '为着',
+  '为止',
+  '喂',
+  '嗡',
+  '嗡嗡',
+  '喔唷',
+  '我',
+  '我们',
+  '乌乎',
+  '呜',
+  '呜呼',
+  '无',
+  '无论',
+  '无宁',
+  '毋宁',
+  '兮',
+  '嘻',
+  '下',
+  '吓',
+  '先不先',
+  '相对而言',
+  '向',
+  '向使',
+  '向着',
+  '像',
+  '小',
+  '些',
+  '嘘',
+  '许多',
+  '呀',
+  '焉',
+  '沿',
+  '沿着',
+  '要',
+  '要不',
+  '要不然',
+  '要不是',
+  '要么',
+  '要是',
+  '也',
+  '也罢',
+  '也好',
+  '一',
+  '一般',
+  '一旦',
+  '一方面',
+  '一何',
+  '一来',
+  '一切',
+  '一些',
+  '一样',
+  '一则',
+  '一转眼',
+  '依',
+  '依据',
+  '依照',
+  '咦',
+  '已',
+  '已矣',
+  '以',
+  '以便',
+  '以故',
+  '以及',
+  '以来',
+  '以免',
+  '以期',
+  '以上',
+  '以为',
+  '以至',
+  '以至于',
+  '以致',
+  '矣',
+  '矣乎',
+  '矣哉',
+  '亦',
+  '抑或',
+  '因',
+  '因此',
+  '因而',
+  '因了',
+  '因为',
+  '因着',
+  '哟',
+  '用',
+  '用来',
+  '由',
+  '由此',
+  '由此可见',
+  '由是',
+  '由于',
+  '犹且',
+  '犹自',
+  '有',
+  '有的',
+  '有关',
+  '有及',
+  '有时',
+  '有些',
+  '又',
+  '又及',
+  '于',
+  '于是',
+  '于是乎',
+  '欤',
+  '余外',
+  '与',
+  '与此同时',
+  '与否',
+  '与其',
+  '与其说',
+  '越是',
+  '云尔',
+  '云云',
+  '咋',
+  '哉',
+  '再',
+  '再其次',
+  '再说',
+  '再有',
+  '再则',
+  '再者',
+  '再者说',
+  '在',
+  '在下',
+  '在于',
+  '咱',
+  '咱们',
+  '则',
+  '则甚',
+  '贼死',
+  '怎',
+  '怎么',
+  '怎么办',
+  '怎么样',
+  '怎奈',
+  '怎样',
+  '眨眼',
+  '照',
+  '照着',
+  '者',
+  '这',
+  '这般',
+  '这边',
+  '这次',
+  '这儿',
+  '这个',
+  '这会儿',
+  '这就是说',
+  '这里',
+  '这么',
+  '这么点儿',
+  '这么些',
+  '这么样',
+  '这时',
+  '这些',
+  '这样',
+  '这一来',
+  '着',
+  '着呢',
+  '针对',
+  '正巧',
+  '正如',
+  '正是',
+  '正值',
+  '之',
+  '之类',
+  '之所以',
+  '之一',
+  '吱',
+  '直到',
+  '只',
+  '只当',
+  '只怕',
+  '只是',
+  '只限',
+  '只消',
+  '只要',
+  '只有',
+  '至',
+  '至今',
+  '至若',
+  '至于',
+  '致',
+  '诸',
+  '诸如',
+  '诸位',
+  '逐步',
+  '自',
+  '自从',
+  '自打',
+  '自个儿',
+  '自各儿',
+  '自后',
+  '自己',
+  '自家',
+  '自身',
+  '综上所述',
+  '总的来看',
+  '总的来说',
+  '总的说来',
+  '总而言之',
+  '总之',
+  '纵',
+  '纵令',
+  '纵然',
+  '纵使',
+  '最',
+  '遵循',
+  '遵照',
+  '作为',
+  'a',
+  'an',
+  'the',
+  'and',
+  'or',
+  'of',
+  'to',
+  'in',
+  'on',
+  'for',
+  'with',
+  'from',
+  'by',
+  'is',
+  'are',
+  'am',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'have',
+  'has',
+  'had',
+  'this',
+  'that',
+  'these',
+  'those',
+  'it',
+  'its',
+  'at',
+  'as',
+  'but',
+  'not',
+  'so',
+  'if',
+  'then',
+  'than',
+  'too',
+  'very',
+  'you',
+  'your',
+  'we',
+  'our',
+  'they',
+  'their',
+  'he',
+  'she',
+  'him',
+  'her',
+  'them',
+  'his',
+  'out',
+  'up',
+  'down',
+  'off',
+  'over',
+  'under',
+  'again',
+  'further',
+  'once',
+  'here',
+  'there',
+  'all',
+  'any',
+  'both',
+  'each',
+  'few',
+  'more',
+  'most',
+  'other',
+  'some',
+  'such',
+  'no',
+  'nor',
+  'only',
+  'own',
+  'same',
+  's',
+  't',
+  'can',
+  'will',
+  'just',
+  'don',
+  'should',
+  'now',
+  'video',
+  'mp4',
+  'mkv',
+  'avi',
+  'mp3',
+  'zip',
+  'rar',
+  'txt',
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'pdf',
+  'part',
+  'hd',
+  '4k',
+  '1080p',
+  'chc',
+  'bilibili',
+  'www',
+  'com',
+  'https',
+  'http',
+]);
+
 const BASE = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
 const SHARE_MODE = /^\/s\//.test(location.pathname);
 let roots = [];
@@ -1616,6 +2476,176 @@ function entrySearchText(e) {
   if (searchMetaMode) parts.push(...metaContentTexts(e.meta));
   return parts.map(normSearch);
 }
+// ============================================================================
+// 推荐标签：文件名+元数据关键词自动提取（异步增量统计，Top10 渐出）
+// ============================================================================
+const TAG_BATCH = 20;      // 每批处理文件数（分批让出主线程，避免卡列表渲染）
+const TAG_TOP_N = 10;      // 推荐标签个数
+const TAG_WEIGHT = 2;      // 元数据 tags 完整标签的权重（高于文件名 bigram 的 1）
+const TAG_MIN_LEN = 2;     // 词条长度下限
+const TAG_MAX_LEN = 20;    // 词条长度上限
+// 常见文件扩展名不做标签（文件名结构性后缀，避免 mp4/mkv 之类霸榜）
+const TAG_EXT_NONWORDS = ["mp4","webm","ogv","ogg","m4v","mov","mkv","avi","ts","flv","wmv","m2ts","mkv3","md","markdown","txt","log","json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","conf","cfg","csv","sql","svg","env","gitignore","zip","rar","7z","gz","xz","tar","pdf","lnk","exe","msi","iso","img","torrent","nfo","srt","ass","lrc","wav","flac","aac","ape","woff","woff2","ttf","otf","ico","bmp","webm","doc","docx","xls","xlsx","ppt","pptx"];
+// 文本分片：CJK 连续段作为一个整体 chunk（如"北京冬奥"）；非 CJK（英文/数字）按连续字母数字切词（空格/标点自然分隔）
+function splitChunks(s) {
+  const out = [];
+  const re = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+|[A-Za-z0-9]+/g;
+  let m;
+  while ((m = re.exec(s)) !== null) out.push(m[0]);
+  return out;
+}
+function isCJKChunk(c) { return /^[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]+$/.test(c); }
+// 噪声词过滤：纯数字 / 版本号(1.2.3, v1) / 日期(2022-05-01) / 常见扩展名
+function isTagNoiseWord(w) {
+  if (/^\d+$/.test(w)) return true;
+  if (/^\d+(\.\d+)+$/.test(w)) return true;
+  if (/^v\d+$/i.test(w)) return true;
+  if (/^\d{4}[-/年]\d{1,2}[-/月]\d{1,2}[日号]?$/.test(w)) return true;
+  if (TAG_EXT_NONWORDS.indexOf(w) >= 0) return true;
+  return false;
+}
+// 【可复用接口（供标签推荐/后续模糊匹配共用）】文本→关键词条：
+//  - texts: 归一化文本数组（文件名/标题/作者/备注等）
+//  - tags: 元数据完整标签数组（整体作为独立词条、权重 TAG_WEIGHT，不做 n-gram）
+//  - 返回 Map<词, 权重>：同一文件内同名词只保留最高权重（文件级去重，外层按"出现文件数"计分）
+function extractKeywords(texts, tags) {
+  const map = new Map();
+  const add = (w, wgt) => {
+    if (w.length < TAG_MIN_LEN || w.length > TAG_MAX_LEN) return;
+    if (STOPWORDS.has(w)) return;
+    if (isTagNoiseWord(w)) return;
+    const prev = map.get(w);
+    if (!prev || wgt > prev) map.set(w, wgt);
+  };
+  (texts || []).forEach(t => {
+    splitChunks(String(t)).forEach(chunk => {
+      if (isCJKChunk(chunk)) { // CJK 段 bigram 分词（如"北京冬奥"→ 北京/京冬/冬奥），长度<2 无产物
+        const seen = new Set();
+        for (let i = 0; i + 2 <= chunk.length; i++) {
+          const g = chunk.slice(i, i + 2);
+          if (seen.has(g)) continue;
+          seen.add(g);
+          add(g, 1);
+        }
+      } else {
+        add(chunk, 1); // 英文/数字整词保留（长度≥2）
+      }
+    });
+  });
+  (tags || []).forEach(t => { if (t) add(String(t), TAG_WEIGHT); });
+  return map;
+}
+// 收集单个 entry 的标签文本源：文件名+标题+作者+备注（tags 单独走完整词条权重）
+function entryTagTexts(e) {
+  const m = e.meta || {};
+  const texts = [e.name, m.title, m.author];
+  if (Array.isArray(m.notes)) texts.push(...m.notes);
+  else if (typeof m.notes === "string" && m.notes) texts.push(m.notes);
+  const tags = Array.isArray(m.tags) ? m.tags : (m.tags ? [m.tags] : []);
+  return { texts: texts.filter(Boolean), tags };
+}
+// 异步增量统计：每批 TAG_BATCH 个文件，批间 setTimeout(0) 让出主线程；每批后重渲染 Top10（渐出）
+let _tagScanToken = 0;     // 扫描令牌：重新扫描/目录切换时递增，使旧扫描的后续批次失效
+let _tagScanState = null;  // 进行中的扫描 { token, path, st, idx }
+let _tagScanTimer = null;
+const _tagCache = new Map(); // path -> { scores: Map<词,加权文件数>, done, total, complete }
+function tagScanReset() {
+  _tagScanToken++;
+  if (_tagScanTimer) { clearTimeout(_tagScanTimer); _tagScanTimer = null; }
+  _tagScanState = null;
+}
+function startTagScan() {
+  // 虚拟分享/空目录：currentEntries 为空时静默不扫描，显示空态
+  if (!currentEntries.length) { tagScanReset(); tagRenderEmpty(); return; }
+  const path = cur;
+  let st = _tagCache.get(path);
+  if (!st) {
+    st = { scores: new Map(), done: 0, total: currentEntries.length, complete: false, path };
+    _tagCache.set(path, st);
+  }
+  if (st.complete) { tagScanReset(); tagRenderTop(st); return; } // 已有统计结果，无需重复全量扫描
+  tagScanReset();
+  _tagScanState = { token: _tagScanToken, path, st, idx: st.done };
+  tagScanStep(_tagScanToken);
+}
+function tagScanStep(token) {
+  const s = _tagScanState;
+  if (!s || s.token !== token) return; // 已被新扫描取代
+  const st = s.st;
+  if (!currentEntries.length || st.path !== cur) { tagScanReset(); tagRenderEmpty(); return; }
+  const end = Math.min(s.idx + TAG_BATCH, st.total);
+  for (let i = s.idx; i < end; i++) {
+    const e = currentEntries[i];
+    if (!e) continue;
+    const { texts, tags } = entryTagTexts(e);
+    extractKeywords(texts.map(normSearch), tags.map(normSearch)).forEach((wgt, w) => {
+      st.scores.set(w, (st.scores.get(w) || 0) + wgt); // score=出现该词的加权文件数（文件级去重已由 extractKeywords 保证）
+    });
+  }
+  st.done = end;
+  s.idx = end;
+  if (end >= st.total) {
+    st.complete = true;
+    _tagScanState = null;
+    tagRenderDone(st);
+    tagRenderTop(st); // 扫描完成：显示 Top10
+    return;
+  }
+  tagRenderProgress(st); // 渐出：每批处理完更新一次 Top10 与进度
+  tagRenderTop(st);
+  _tagScanTimer = setTimeout(() => tagScanStep(token), 0); // 让出主线程
+}
+// Top10：score 降序，同分按词排序（稳定）
+function tagTopWords(st) {
+  const arr = [];
+  st.scores.forEach((score, word) => arr.push({ word, score }));
+  arr.sort((a, b) => b.score === a.score ? (a.word < b.word ? -1 : a.word > b.word ? 1 : 0) : b.score - a.score);
+  return arr.slice(0, TAG_TOP_N);
+}
+function tagRenderTop(st) {
+  const box = $("tagSuggest");
+  if (!box) return;
+  const top = tagTopWords(st);
+  if (!top.length) { box.innerHTML = '<span class="text-muted small">暂无推荐标签</span>'; return; }
+  box.innerHTML = "";
+  top.forEach(t => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tag-chip";
+    b.title = "点击加入搜索 · 推荐度 " + t.score;
+    b.innerHTML = esc(t.word) + '<span class="score">' + t.score + "</span>";
+    b.onclick = ev => tagApplyTag(ev, t.word);
+    box.appendChild(b);
+  });
+}
+function tagRenderProgress(st) {
+  const hint = $("tagHint");
+  if (hint) hint.textContent = "分析中… 已处理 " + st.done + "/" + st.total + " 个文件";
+}
+function tagRenderDone(st) {
+  const hint = $("tagHint");
+  if (hint) hint.textContent = st.total > 0 ? "扫描完成，共 " + st.total + " 个文件" : "";
+}
+function tagRenderEmpty() {
+  const box = $("tagSuggest");
+  if (box) box.innerHTML = '<span class="text-muted small">暂无推荐标签</span>';
+  const hint = $("tagHint");
+  if (hint) hint.textContent = "";
+}
+// 点击标签：追加到搜索框（空格连接）并触发现有过滤；pulse 视觉反馈
+function tagApplyTag(ev, word) {
+  const input = $("searchInput");
+  const curVal = input.value.trim();
+  input.value = curVal ? curVal + " " + word : word;
+  searchQuery = input.value;
+  renderEntries();
+  if (ev && ev.currentTarget) {
+    const el = ev.currentTarget;
+    el.classList.add("pulse");
+    setTimeout(() => el.classList.remove("pulse"), 260);
+  }
+  input.focus();
+}
 // 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(AND 多关键词，匹配文件名+meta 元信息)。
 function filterEntries(entries, query) {
   const types = [];
@@ -1706,6 +2736,7 @@ function openSidebar() {
   sidebarOpen = true;
   $("sidebar").classList.add("show");
   $("sidebarMask").classList.add("show");
+  startTagScan(); // 打开侧边栏时触发推荐标签扫描（有缓存则直接渲染）
 }
 function closeSidebar() {
   sidebarOpen = false;
@@ -1728,6 +2759,11 @@ $("searchInput").addEventListener("input", () => {
   clearTimeout(_searchDebounce);
   _searchDebounce = setTimeout(renderEntries, 150);
 });
+// 推荐标签手动刷新：清当前目录缓存并重新扫描
+$("tagRefresh").onclick = () => {
+  _tagCache.delete(cur);
+  startTagScan();
+};
 // 搜索范围切换：文件名 / 文件名+元数据内容
 $("searchMetaToggle").addEventListener("change", () => {
   searchMetaMode = $("searchMetaToggle").checked;
@@ -1789,6 +2825,7 @@ async function loadList(path, opts) {
   const data = await api("api/list?path=" + encodeURIComponent(path) + "&meta=1");
   if (data.error) {
     currentEntries = [];
+    tagScanReset(); tagRenderEmpty();
     rows.innerHTML = "";
     showAlert(data.error, [
       { label: "↩ 返回上级", fn: () => {
@@ -1815,6 +2852,9 @@ async function loadList(path, opts) {
   updateNavBtns();
   currentEntries = data.entries;
   renderEntries();
+  // 目录已切换/内容可能变化：使该目录标签缓存失效并重新扫描（侧边栏打开时可见渐出效果）
+  _tagCache.delete(cur);
+  startTagScan();
 }
 
 // 列表模式条目（点击行为与 grid 一致）

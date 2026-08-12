@@ -141,6 +141,14 @@
                background: #fff; transition: all .15s ease; }
   .type-chip input { margin: 0; cursor: pointer; }
   .type-chip.active { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; }
+  /* 推荐标签 chips（点击→追加到搜索框，pulse 为点击反馈动画） */
+  .tag-chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--bs-border-color);
+              border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px; user-select: none;
+              background: #fff; transition: all .15s ease; }
+  .tag-chip:hover { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; }
+  .tag-chip .score { font-size: 10px; opacity: .55; }
+  .tag-chip.pulse { animation: tagPulse .25s ease; }
+  @keyframes tagPulse { 0% { transform: scale(1); } 50% { transform: scale(1.18); } 100% { transform: scale(1); } }
 </style>
 </head>
 <body class="bg-body-tertiary">
@@ -239,6 +247,14 @@
           <span class="form-check-label">元数据</span>
         </label>
       </div>
+    </div>
+    <div class="mb-3">
+      <div class="d-flex align-items-center justify-content-between mb-1">
+        <label class="form-label small fw-semibold mb-0">推荐标签</label>
+        <button type="button" id="tagRefresh" class="btn btn-link btn-sm p-0 text-decoration-none" title="重新扫描当前目录">↻</button>
+      </div>
+      <div id="tagSuggest" class="d-flex flex-wrap gap-1"></div>
+      <div id="tagHint" class="text-muted small mt-1"></div>
     </div>
     <div class="mb-3">
       <label class="form-label small fw-semibold mb-1">视图</label>
