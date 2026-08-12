@@ -2646,8 +2646,144 @@ function tagApplyTag(ev, word) {
   }
   input.focus();
 }
-// 过滤管道：类型多选(OR) + 自输入后缀(OR) + 搜索词(AND 多关键词，匹配文件名+meta 元信息)。
-function filterEntries(entries, query) {
+// ============================================================================
+// 模糊匹配核心（纯函数，无 DOM 依赖，可 node 单测）。
+// 归一化（简繁/大小写）由调用方在源文本上完成，本区段只处理归一后的字符合串。
+// 方向性：LCS(kw, target) 中 kw 缺字时 target 是 kw 的子序列，LCS 天然覆盖"缺字"。
+// ============================================================================
+const FUZZY_SCORE_MIN = 0.8;   // 概率 ≥ 0.8 判定为匹配
+const FUZZY_MULTI_MIN = 0.8;   // 硬性字符约束：多集覆盖率下限（防全错字）
+const FUZZY_PRESCREEN = 0.6;   // 预筛阈值：多集覆盖率 < 0.6 直接判不匹配（字符都不齐必不中）
+const FUZZY_TARGET_MAX = 200;  // 超长文本截断长度（meta 大段 notes 等），限制 O(n·m) 计算量
+const FUZZY_PERM_WMIX = 0.6;   // s_perm 中 s_multi 的权重（1-权重 给 max(s_lcs, s_edit)）：
+                               // 调研原案为 0.5/0.5 且顺序约束取 min(s_lcs, s_edit)，但该组合下
+                               // ①"猫狗vs狗猫"得 0.75 < 0.8，与验收断言冲突；
+                               // ②乱序+后缀（如"约里.mp4"vs"里约"）时滑窗 DL 被窗口额外字符
+                               //   惩罚到 0，min 取到 0 使乱序加权失效，文件名后缀场景漏匹配。
+                               // 0.6/0.4 + max：2 字完全乱序恰好 0.8 过线，3 字以上完全乱序不过线
+// 字符多集覆盖率：kw 各字符在 target 中可被消耗的次数 / len(kw)（乱序上限约束；0.8 硬约束由判定方强制）
+function multisetCoverage(kw, target) {
+  const n = kw.length;
+  if (!n) return 1;
+  if (!target) return 0;
+  const counts = new Map();
+  for (const ch of target) counts.set(ch, (counts.get(ch) || 0) + 1);
+  let hit = 0;
+  for (const ch of kw) {
+    const c = counts.get(ch) || 0;
+    if (c > 0) { hit++; counts.set(ch, c - 1); }
+  }
+  return hit / n;
+}
+// 最长公共子序列长度（DP 滚动数组，O(n·m)）：隔开（子序列）+ 缺字（target 是 kw 子序列）统一覆盖
+function lcsLength(a, b) {
+  const n = a.length, m = b.length;
+  if (!n || !m) return 0;
+  let prev = new Uint32Array(m + 1);
+  let cur = new Uint32Array(m + 1);
+  for (let i = 1; i <= n; i++) {
+    const ai = a[i - 1];
+    for (let j = 1; j <= m; j++) {
+      if (ai === b[j - 1]) cur[j] = prev[j - 1] + 1;
+      else cur[j] = prev[j] > cur[j - 1] ? prev[j] : cur[j - 1];
+    }
+    const t = prev; prev = cur; cur = t;
+    cur[0] = 0;
+  }
+  return prev[m];
+}
+// Damerau-Levenshtein 距离（含相邻转位；滚动两行版，O(n·m)）
+function damerauLevenshtein(a, b) {
+  const n = a.length, m = b.length;
+  if (!n) return m;
+  if (!m) return n;
+  let prev2 = new Uint32Array(m + 1);
+  let prev1 = new Uint32Array(m + 1);
+  let cur = new Uint32Array(m + 1);
+  for (let j = 0; j <= m; j++) prev1[j] = j;
+  for (let i = 1; i <= n; i++) {
+    cur[0] = i;
+    const ai = a[i - 1];
+    for (let j = 1; j <= m; j++) {
+      const cost = ai === b[j - 1] ? 0 : 1;
+      let v = Math.min(cur[j - 1] + 1, prev1[j] + 1, prev1[j - 1] + cost);
+      if (i > 1 && j > 1 && ai === b[j - 2] && a[i - 2] === b[j - 1]) {
+        v = Math.min(v, prev2[j - 2] + 1); // 相邻转位
+      }
+      cur[j] = v;
+    }
+    prev2 = prev1; prev1 = cur; cur = new Uint32Array(m + 1);
+  }
+  return prev1[m];
+}
+// 滑窗编辑相似度：窗口宽 = len(kw)+2（容差 2，覆盖插入/错字/相邻转位），在 target 上取全串最小 DL
+function fuzzyEditScore(kw, target) {
+  const n = kw.length;
+  if (!n) return 1;
+  const m = target.length;
+  if (!m) return 0;
+  const win = Math.min(n + 2, m);
+  let best = n;
+  for (let i = 0; i + win <= m; i++) {
+    const d = damerauLevenshtein(kw, target.slice(i, i + win));
+    if (d < best) {
+      best = d;
+      if (best === 0) break;
+    }
+  }
+  return 1 - best / n;
+}
+// 单关键词模糊打分（0..1，供测试/展示；正式判定用 fuzzyMatchKw）：
+//   s_lcs   = LCS(kw,target)/len(kw)                    —— 隔开+缺字
+//   s_edit  = 1 - 滑窗DL(kw,target)/len(kw)             —— 错字+相邻转位
+//   s_multi = 多集覆盖率                                  —— 乱序上限约束
+//   s_perm  = WMIX·s_multi + (1-WMIX)·max(s_lcs,s_edit) —— 乱序加权（需部分顺序约束；
+//             max 取 LCS/滑窗编辑的互补证据，避免后缀/插入使只 s_edit 崩坏拖累乱序加权）
+//   final   = max(s_lcs, s_edit, s_perm)；精确子串恒为 1.0
+function fuzzyScore(kw, target) {
+  if (!kw) return 1;
+  if (!target) return 0;
+  if (target.includes(kw)) return 1; // 精确子串 = 100%
+  const n = kw.length;
+  const t = target.length > FUZZY_TARGET_MAX ? target.slice(0, FUZZY_TARGET_MAX) : target;
+  const sMulti = multisetCoverage(kw, t);
+  if (sMulti < FUZZY_PRESCREEN) return 0; // 预筛：字符都不齐必不中
+  const sLcs = lcsLength(kw, t) / n;
+  const sEdit = fuzzyEditScore(kw, t);
+  const sPerm = FUZZY_PERM_WMIX * sMulti + (1 - FUZZY_PERM_WMIX) * Math.max(sLcs, sEdit);
+  return Math.max(sLcs, sEdit, sPerm);
+}
+// 判定：final ≥ 0.8 且 多集覆盖率 ≥ 0.8（硬性字符约束，防全错字）。
+// 阶段短路：预筛(<0.6) → 字符硬约束(<0.8) → LCS 达标 → 滑窗编辑达标 → 乱序加权达标。
+function fuzzyMatchKw(kw, target) {
+  if (!kw) return true;
+  if (!target) return false;
+  if (target.includes(kw)) return true;
+  const n = kw.length;
+  const t = target.length > FUZZY_TARGET_MAX ? target.slice(0, FUZZY_TARGET_MAX) : target;
+  const sMulti = multisetCoverage(kw, t);
+  if (sMulti < FUZZY_PRESCREEN) return false; // 预筛短路
+  if (sMulti < FUZZY_MULTI_MIN) return false; // 硬性字符约束
+  const sLcs = lcsLength(kw, t) / n;
+  if (sLcs >= FUZZY_SCORE_MIN) return true;   // 隔开/缺字已达标
+  const sEdit = fuzzyEditScore(kw, t);
+  if (sEdit >= FUZZY_SCORE_MIN) return true;  // 错字/转位已达标
+  const sPerm = FUZZY_PERM_WMIX * sMulti + (1 - FUZZY_PERM_WMIX) * Math.max(sLcs, sEdit);
+  return sPerm >= FUZZY_SCORE_MIN;            // 乱序加权
+}
+// 多关键词 AND 判定：每个 kw 至少命中一个文本部件（对应 entrySearchText 的搜索模式）
+function fuzzyMatchTexts(terms, texts) {
+  return terms.every(kw => {
+    for (let i = 0; i < texts.length; i++) {
+      if (fuzzyMatchKw(kw, texts[i])) return true;
+    }
+    return false;
+  });
+}
+// ===== 模糊匹配核心结束 =====
+// 硬筛选（不含搜索词）：类型多选(OR) + 自输入后缀(OR)。
+// 两阶段搜索共用：精确阶段与模糊阶段基于同一候选集，保证两者结果一致且不重复。
+function applyHardFilters(entries) {
   const types = [];
   document.querySelectorAll("#typeFilters input[type=checkbox]:checked").forEach(cb => {
     types.push(cb.getAttribute("data-type"));
@@ -2658,6 +2794,12 @@ function filterEntries(entries, query) {
     out = out.filter(e =>
       types.some(t => entryKindMatch(e, t)) || exts.some(x => extOf(e.name) === x));
   }
+  return out;
+}
+// 过滤管道：硬筛选 + 搜索词精确子串（AND 多关键词，匹配文件名+meta 元信息）。
+// 第一阶段（同步）只做精确子串；概率模糊匹配由 startFuzzyPass 异步补充。
+function filterEntries(entries, query) {
+  let out = applyHardFilters(entries);
   const q = normSearch(query);
   if (q) {
     const terms = q.split(/\s+/).filter(Boolean); // 空格分词，多关键词 AND
@@ -2691,29 +2833,127 @@ function updateSortLabel() {
     }
   }
 }
-// 排序（原地）：各字段先按"升序"计算再乘 sortDir（mtime: -1 新→旧；name: ±1；size: -1 大→小）。
-// 目录永远排前（不随方向翻转），用户关注的是文件排序方向。
-function sortEntries(list) {
+// 条目比较器（目录永远排前，不随方向翻转）：sortEntries（全量）与模糊插入二分（单点）共用，
+// 保证渐进插入的模糊命中条目与同步渲染结果按同一规则排序。
+function entryCompare(a, b) {
   const dir = sortDir || 1;
   if (sortBy === "name") {
-    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) ||
-                        dir * String(a.name).localeCompare(String(b.name), "zh-Hans-CN"));
+    return ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) ||
+                        dir * String(a.name).localeCompare(String(b.name), "zh-Hans-CN");
   } else if (sortBy === "size") {
-    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.size || 0) - (b.size || 0)));
-  } else {
-    list.sort((a, b) => ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.mtime || 0) - (b.mtime || 0)));
+    return ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.size || 0) - (b.size || 0));
   }
+  return ((b.is_dir ? 1 : 0) - (a.is_dir ? 1 : 0)) || dir * ((a.mtime || 0) - (b.mtime || 0));
 }
-// 统一渲染入口：从 currentEntries 过滤 → 排序 → 渲染（不再重新请求）
+// 排序（原地）：各字段先按"升序"计算再乘 sortDir（mtime: -1 新→旧；name: ±1；size: -1 大→小）。
+function sortEntries(list) {
+  list.sort(entryCompare);
+}
+// 统一渲染入口：从 currentEntries 过滤 → 排序 → 渲染（不再重新请求）。
+// 两阶段搜索：
+//   阶段一（同步立即）：精确子串过滤（filterEntries）→ 排序 → 全量渲染，用户输入后马上看到结果；
+//   阶段二（异步渐进）：未命中文件进入模糊队列，分片做概率匹配，命中后按同一排序插入正确位置。
 function renderEntries() {
   const rows = $("fileRows");
   rows.classList.toggle("grid", view === "grid");
-  if (!currentEntries.length) { rows.innerHTML = '<div class="empty">空目录</div>'; return; }
-  const list = filterEntries(currentEntries, searchQuery);
+  if (!currentEntries.length) {
+    rows.innerHTML = '<div class="empty">空目录</div>';
+    _shownEntries = [];
+    startFuzzyPass();
+    return;
+  }
+  const list = filterEntries(currentEntries, searchQuery); // 阶段一：精确子串 + 硬筛选
   sortEntries(list);
-  if (!list.length) { rows.innerHTML = '<div class="empty">无匹配项</div>'; return; }
-  rows.innerHTML = "";
-  list.forEach(e => rows.appendChild(view === "grid" ? gridItem(e) : listItem(e)));
+  if (!list.length) rows.innerHTML = '<div class="empty">无匹配项</div>';
+  else {
+    rows.innerHTML = "";
+    list.forEach(e => rows.appendChild(view === "grid" ? gridItem(e) : listItem(e)));
+  }
+  _shownEntries = list.slice(); // 与 DOM children 顺序一一对应
+  startFuzzyPass();             // 阶段二：未命中文件的概率模糊匹配（异步）
+}
+// ============================================================================
+// 两阶段搜索第二阶段：异步概率模糊匹配 + 排序插入
+// ============================================================================
+let _fuzzyToken = 0;      // 令牌：新输入/重渲染/目录切换递增，使旧模糊任务失效（可打断）
+let _fuzzyTimer = null;   // 分片定时器
+let _shownEntries = [];   // 当前已渲染 entry（与 DOM 顺序一致，已按 entryCompare 排序）
+let _fuzzyQueue = [];     // 待模糊检查的 entry（已过硬筛选、未精确命中）
+let _fuzzyDone = 0;       // 已处理数（进度提示）
+let _fuzzyTotal = 0;      // 总数（进度提示）
+const FUZZY_BATCH = 30;   // 每批处理文件数（批间 setTimeout(0) 让出主线程）
+function fuzzyShowHint() {
+  const el = $("fuzzyHint");
+  if (el) {
+    el.classList.remove("d-none");
+    el.textContent = "正在模糊匹配… " + _fuzzyDone + "/" + _fuzzyTotal;
+  }
+}
+function fuzzyHideHint() {
+  const el = $("fuzzyHint");
+  if (el) { el.classList.add("d-none"); el.textContent = ""; }
+}
+// 单个 entry 的模糊判定：按当前搜索模式取可搜索文本（entrySearchText），多关键词 AND
+function fuzzyMatchEntry(e, terms) {
+  let texts = e._fuzzyTexts;
+  if (!texts) { texts = e._fuzzyTexts = entrySearchText(e); }
+  return fuzzyMatchTexts(terms, texts);
+}
+// 二分查找插入点：_shownEntries 已排序，找到第一个 entryCompare(e, it) < 0 的位置
+function sortedInsertIndex(e) {
+  let lo = 0, hi = _shownEntries.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (entryCompare(e, _shownEntries[mid]) < 0) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+// 将模糊命中的 entry 插入 DOM 正确排序位置（先移除空态占位，再二分插入）
+function insertIntoSortedDom(e) {
+  const rows = $("fileRows");
+  const emptyEl = rows.querySelector(".empty");
+  if (emptyEl) emptyEl.remove(); // 同步阶段无结果时先显示空态，模糊命中后替换
+  const idx = sortedInsertIndex(e);
+  _shownEntries.splice(idx, 0, e);
+  const node = view === "grid" ? gridItem(e) : listItem(e);
+  rows.insertBefore(node, rows.children[idx] || null);
+}
+// 启动模糊补充：只处理"通过硬筛选但未精确命中"的文件；无搜索词/无可查文件时直接返回
+function startFuzzyPass() {
+  _fuzzyToken++; // 使上一轮未完成的模糊任务失效
+  if (_fuzzyTimer) { clearTimeout(_fuzzyTimer); _fuzzyTimer = null; }
+  fuzzyHideHint();
+  const q = normSearch(searchQuery);
+  const terms = q.split(/\s+/).filter(Boolean);
+  if (!terms.length) return; // 无搜索词：全部精确命中，无需模糊
+  const shown = new Set(_shownEntries.map(x => x.path));
+  const queue = applyHardFilters(currentEntries).filter(x => !shown.has(x.path));
+  if (!queue.length) return;
+  queue.forEach(x => { x._fuzzyTexts = entrySearchText(x); }); // 预计算，避免每批重复归一化
+  _fuzzyQueue = queue;
+  _fuzzyTotal = queue.length;
+  _fuzzyDone = 0;
+  const myToken = _fuzzyToken;
+  fuzzyShowHint();
+  _fuzzyTimer = setTimeout(() => fuzzyStep(myToken, terms), 0);
+}
+// 模糊分片：每批 FUZZY_BATCH 个文件，命中即插入 DOM；令牌失效（新输入）立即停止
+function fuzzyStep(token, terms) {
+  if (token !== _fuzzyToken) return; // 已被新输入/重渲染打断
+  const end = Math.min(_fuzzyDone + FUZZY_BATCH, _fuzzyQueue.length);
+  for (let i = _fuzzyDone; i < end; i++) {
+    const e = _fuzzyQueue[i];
+    if (fuzzyMatchEntry(e, terms)) insertIntoSortedDom(e);
+  }
+  _fuzzyDone = end;
+  if (end < _fuzzyQueue.length) {
+    fuzzyShowHint();
+    _fuzzyTimer = setTimeout(() => fuzzyStep(token, terms), 0); // 让出主线程
+  } else {
+    _fuzzyTimer = null;
+    fuzzyHideHint();
+  }
 }
 function setView(v) {
   if (view === v) return;
