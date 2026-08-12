@@ -866,7 +866,6 @@ let roots = [];
 let activeRoot = null;
 let cur = null;
 let pinned = [];
-let FMT = "zip";
 let shareRoot = null;
 let shareName = "";
 let shareExpires = null;
@@ -911,7 +910,7 @@ function dlUrl(p) { return BASE + "dl?path=" + encodeURIComponent(p); }
 const VIDEO_EXT = ["mp4","webm","ogv","ogg","m4v","mov","mkv","avi","ts","flv"];
 const MD_EXT = ["md","markdown"];
 const TEXT_EXT = ["txt","log","json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","conf","cfg","csv","sql","svg","env","gitignore"];
-const ARCHIVE_EXT = ["zip","rar"];
+const ARCHIVE_EXT = ["zip"];
 function extOf(name) {
   const i = String(name).lastIndexOf(".");
   return i < 0 ? "" : String(name).slice(i + 1).toLowerCase();
@@ -2213,12 +2212,12 @@ async function api(ep, opt) {
 }
 
 function setPackBtn() {
-  $("packBtn").innerHTML = '<span class="d-none d-sm-inline">📦 打包 .' + FMT + ' 下载</span>' +
+  $("packBtn").innerHTML = '<span class="d-none d-sm-inline">📦 打包 .zip 下载</span>' +
                            '<span class="d-inline d-sm-none">📦 打包</span>';
 }
 
 function hideMainUi() {
-  if ($("packBtn")) $("packBtn").classList.add("d-none");
+  if ($("packGroup")) $("packGroup").classList.add("d-none");
   if ($("uploadBtn")) $("uploadBtn").classList.add("d-none");
   if ($("driveTabs")) $("driveTabs").classList.add("d-none");
   if ($("pinnedCard")) $("pinnedCard").classList.add("d-none");
@@ -2253,7 +2252,6 @@ async function init() {
   const info = await api("api/info");
   roots = info.roots || [];
   pinned = info.pinned || [];
-  FMT = info.archive_format || "zip";
   setPackBtn();
   renderDriveTabs();
   renderPinned();
@@ -3246,10 +3244,107 @@ function bindRowAction(el, e, locked) {
 
 $("refreshBtn").onclick = () => { if (cur !== null) loadList(cur); };
 
+// ---------------- 打包下载（fetch + Blob 流式：进度条 / 取消 / 失败清单） ----------------
+let packBusy = false;   // 打包进行中（防重复触发）
+let packAbort = null;   // 当前打包请求的 AbortController
+
+// 打包期间禁用主按钮与模式下拉，防止重复请求
+function setPackBusy(busy) {
+  $("packBtn").disabled = busy;
+  const m = $("packMenuBtn");
+  if (m) m.disabled = busy;
+}
+
+async function startPack(mode) {
+  if (packBusy) return;
+  packBusy = true;
+  packAbort = new AbortController();
+  setPackBusy(true);
+  const wrap = $("packWrap"), bar = $("packBar");
+  wrap.classList.remove("d-none");
+  wrap.classList.add("d-flex");
+  bar.style.width = "0%";
+  try {
+    const paths = pinned.map(p => p.path).join("|");
+    const r = await fetch(BASE + "dlzip?paths=" + encodeURIComponent(paths) +
+                          "&mode=" + encodeURIComponent(mode),
+                          { signal: packAbort.signal });
+    if (!r.ok) {
+      // 后端 400 时返回 JSON 错误（如"没有可打包的文件"/临时空间不足）
+      let msg = "打包失败（HTTP " + r.status + "）";
+      try { const j = await r.json(); if (j.error) msg = j.error; } catch (e) { /* 非 JSON 错误体 */ }
+      toast(msg);
+      return;
+    }
+    // 按 Content-Length 流式读 body，更新进度条
+    const total = parseInt(r.headers.get("Content-Length") || "0", 10);
+    const reader = r.body.getReader();
+    const chunks = [];
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && value.length) {
+        chunks.push(value);
+        got += value.length;
+      }
+      if (total > 0) bar.style.width = Math.min(100, Math.round(got / total * 100)) + "%";
+    }
+    // 失败清单：X-Archive-Skipped 头（URL 编码 JSON，可能被截断）+ 总数头
+    const sh = r.headers.get("X-Archive-Skipped");
+    const sc = parseInt(r.headers.get("X-Archive-Skipped-Count") || "0", 10);
+    if (sh || sc > 0) {
+      let list = [];
+      try { list = JSON.parse(decodeURIComponent(sh || "[]")); } catch (e) { /* 截断导致解析失败时仅显示计数 */ }
+      if (Array.isArray(list) && list.length) {
+        showAlert("以下 " + sc + " 个文件未打包成功：\n" +
+                  list.map(x => x.path + "（" + x.reason + "）").join("\n") +
+                  (sc > list.length ? "\n…其余 " + (sc - list.length) + " 项已省略" : ""),
+                  [{ label: "知道了", fn: hideAlert }]);
+      }
+    }
+    // 下载文件名取自服务端 Content-Disposition（中文名），缺省 archive.zip
+    let fname = "archive.zip";
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+    if (m) { try { fname = decodeURIComponent(m[1]); } catch (e) { /* 保持默认 */ } }
+    // Blob 下载并释放对象 URL
+    const blob = new Blob(chunks, { type: "application/octet-stream" });
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
+  } catch (e) {
+    if (e && e.name === "AbortError") toast("已取消打包");
+    else toast("打包失败: " + (e && e.message || e));
+  } finally {
+    packBusy = false;
+    packAbort = null;
+    setPackBusy(false);
+    wrap.classList.remove("d-flex");
+    wrap.classList.add("d-none");
+  }
+}
+
 $("packBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }
-  location.href = BASE + "dlzip?paths=" + encodeURIComponent(pinned.map(p => p.path).join("|"));
+  startPack("normal");
 };
+
+// 压缩级别下拉：store=最快 / fast=快 / normal=标准
+document.querySelectorAll("[data-amode]").forEach(el => {
+  el.onclick = (ev) => {
+    ev.preventDefault();
+    if (!pinned.length) { toast("还没有置顶文件"); return; }
+    startPack(el.getAttribute("data-amode"));
+  };
+});
+
+$("packCancel").onclick = () => { if (packAbort) packAbort.abort(); };
 
 $("shareAllBtn").onclick = () => {
   if (!pinned.length) { toast("还没有置顶文件"); return; }

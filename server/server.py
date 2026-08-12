@@ -5,7 +5,7 @@
   * 浅色现代网盘 UI：磁盘标签页、面包屑、上传、下载、置顶、打包。
   * 默认浏览整机所有固定磁盘（也可指定单个根目录）。
   * 只读浏览 + 可向当前目录上传文件（不能删除/修改服务器端已有文件）。
-  * 打包下载：检测到 WinRAR 用 .rar，否则自动降级 .zip。
+  * 打包下载：纯 zipfile 输出 .zip（支持目录递归/多选/三种压缩级别）。
   * 权限错误优雅处理：无权限目录提示"返回上级"，页面不卡死。
 
 工具（MCP 模式）：
@@ -930,7 +930,11 @@ class _DriveHandler(BaseHTTPRequestHandler):
             return
         if sub == "dlzip":
             # 分享内打包：入参 paths 用 _resolve_share_path 解析（虚拟路径或真实路径都命中）。
-            # 虚拟分享下把 (虚拟相对路径, 真实路径) 交给 _stream_archive_virtual 输出 .lnk 复用。
+            # 虚拟分享下把 (虚拟相对路径, 真实路径) 直接交给统一打包核心；普通分享
+            # 先组装 arcname（相对公共父目录）再调用同一核心。mode 控制压缩级别。
+            mode = q.get("mode") or "normal"
+            if mode not in _ARCHIVE_MODES:
+                mode = "normal"
             raw = q.get("paths") or ""
             if share.get("virtual"):
                 virtual_items = []
@@ -943,14 +947,18 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 if not virtual_items:
                     self._send_json({"error": "没有可打包的文件"}, 400)
                     return
-                _stream_archive_virtual(self, virtual_items)
+                _stream_archive(self, virtual_items, mode)
                 return
             paths = [self._resolve_share_path(share, x) for x in raw.split("|") if x]
             paths = [p for p in paths if p and os.path.exists(p)]
             if not paths:
                 self._send_json({"error": "没有可打包的文件"}, 400)
                 return
-            _stream_archive(self, paths)
+            items = _build_archive_items(paths)
+            if not items:
+                self._send_json({"error": "没有可打包的文件"}, 400)
+                return
+            _stream_archive(self, items, mode)
             return
         if sub.startswith("static/"):
             # 分享页需要的离线静态资源（bootstrap/app.js/图标等），复用主站白名单
@@ -1013,7 +1021,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "roots": list(self.server.roots),
                 "pinned": list(self.server.pinned),
-                "archive_format": "rar" if _find_winrar() else "zip",
+                "archive_format": "zip",
             })
         elif route == "/api/list":
             p = self._resolve(q.get("path") or self.server.roots[0])
@@ -1243,14 +1251,14 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(_read_text(p, _parse_read_limit(q)))
         elif route == "/api/unpack":
-            # 压缩包条目列表（zip/rar）
+            # 压缩包条目列表（仅 zip）
             p = self._resolve(q.get("path") or "")
             if p is None or not os.path.isfile(p):
                 self._send_json({"error": "路径越界或不存在"}, 403)
                 return
             self._send_json(_unpack_list(p))
         elif route == "/api/unpackdl":
-            # 下载压缩包内的单个条目（zip 流式 / rar 由 UnRAR 输出）
+            # 下载压缩包内的单个条目（zip 流式）
             arch = self._resolve(q.get("archive") or "")
             entry = q.get("entry") or ""
             if arch is None or not os.path.isfile(arch):
@@ -1265,13 +1273,21 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             self._send_file_range(p)
         elif route == "/dlzip":
+            # 打包下载：paths 用 | 分隔（文件/目录都允许）；mode=store|fast|normal 压缩级别
+            mode = q.get("mode") or "normal"
+            if mode not in _ARCHIVE_MODES:
+                mode = "normal"
             raw = q.get("paths") or ""
             paths = [self._resolve(x) for x in raw.split("|") if x]
             paths = [p for p in paths if p and os.path.exists(p)]
             if not paths:
                 self._send_json({"error": "没有可打包的文件"}, 400)
                 return
-            _stream_archive(self, paths)
+            items = _build_archive_items(paths)
+            if not items:
+                self._send_json({"error": "没有可打包的文件"}, 400)
+                return
+            _stream_archive(self, items, mode)
         else:
             self._send_json({"error": "404"}, 404)
 
@@ -1521,37 +1537,7 @@ def _list_dir(path):
     return out, None
 
 
-def _find_winrar():
-    cands = [
-        r"C:\Users\user\Desktop\other\WinRAR\Rar.exe",
-        r"C:\Users\user\Desktop\other\WinRAR\WinRAR.exe",
-        r"C:\Program Files\WinRAR\WinRAR.exe",
-        r"C:\Program Files\WinRAR\Rar.exe",
-        r"C:\Program Files (x86)\WinRAR\WinRAR.exe",
-        r"C:\Program Files (x86)\WinRAR\Rar.exe",
-    ]
-    env = os.environ.get("WINRAR_PATH")
-    if env and os.path.exists(env):
-        return env
-    for c in cands:
-        if os.path.exists(c):
-            return c
-    return shutil.which("WinRAR.exe") or shutil.which("Rar.exe")
 
-
-def _find_unrar():
-    cands = [
-        r"C:\Users\user\Desktop\other\WinRAR\UnRAR.exe",
-        r"C:\Program Files\WinRAR\UnRAR.exe",
-        r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
-    ]
-    env = os.environ.get("UNRAR_PATH")
-    if env and os.path.exists(env):
-        return env
-    for c in cands:
-        if os.path.exists(c):
-            return c
-    return shutil.which("UnRAR.exe") or shutil.which("UnRAR")
 
 
 # 扩展名 → 预览类型映射（与前端 fileKind 保持一致）
@@ -3224,7 +3210,7 @@ _load_shares()
 
 
 def _unpack_list(path):
-    """压缩包条目列表（功能 4）。zip 用 zipfile；rar 用 UnRAR.exe lb（GBK 输出）。"""
+    """压缩包条目列表（功能 4）。仅支持 zip（zipfile），其它格式返回 unsupported。"""
     ext = os.path.splitext(path)[1].lstrip(".").lower()
     if ext == "zip":
         try:
@@ -3241,40 +3227,6 @@ def _unpack_list(path):
             return {"format": "zip", "entries": entries}
         except (zipfile.BadZipFile, OSError) as exc:
             return {"format": "zip", "entries": [], "error": str(exc)}
-    if ext == "rar":
-        unrar = _find_unrar()
-        if not unrar:
-            return {"format": "rar", "entries": [], "error": "未找到 UnRAR.exe"}
-        try:
-            # 注意：不能加 -idq，实测它会抑制 lb 的条目输出
-            r = subprocess.run(
-                [unrar, "lb", "-p-", path],
-                capture_output=True, timeout=600,
-            )
-            if r.returncode != 0:
-                return {"format": "rar", "entries": [],
-                        "error": (r.stdout + r.stderr).decode("cp936", "replace") or
-                                 "UnRAR 返回码 %d" % r.returncode}
-            lines = [ln.strip() for ln in r.stdout.decode("cp936", "replace").splitlines()
-                     if ln.strip()]
-            entries = []
-            for line in lines:
-                is_dir = line.endswith(("\\", "/"))
-                name = line.rstrip("\\/")
-                entries.append({"name": name, "path_in_archive": name,
-                                "size": 0, "is_dir": is_dir})
-            # UnRAR lb 列出的目录行往往不带尾部斜杠，
-            # 补充判断：是其它条目路径前缀的项也视为目录
-            names = [e["name"] for e in entries]
-            for e in entries:
-                if e["is_dir"]:
-                    continue
-                if any(n != e["name"] and (n.startswith(e["name"] + "\\") or
-                                           n.startswith(e["name"] + "/")) for n in names):
-                    e["is_dir"] = True
-            return {"format": "rar", "entries": entries}
-        except Exception as exc:  # noqa: BLE001
-            return {"format": "rar", "entries": [], "error": str(exc)}
     return {"format": "unsupported", "entries": []}
 
 
@@ -3289,7 +3241,7 @@ def _range_unsatisfiable(handler, fsize):
 
 
 def _unpack_download(handler, archive, entry):
-    """下载压缩包内的单个条目（功能 4）。zip 流式；rar 由 UnRAR p 输出。"""
+    """下载压缩包内的单个条目（功能 4）。仅支持 zip（zipfile 流式）。"""
     ext = os.path.splitext(archive)[1].lstrip(".").lower()
     disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(entry) or "file")
     if ext == "zip":
@@ -3308,175 +3260,257 @@ def _unpack_download(handler, archive, entry):
                     shutil.copyfileobj(src, handler.wfile)
         except Exception as exc:  # noqa: BLE001
             handler._send_error_page("解压失败", str(exc))
-    elif ext == "rar":
-        unrar = _find_unrar()
-        if not unrar:
-            handler._send_error_page("解压失败", "未找到 UnRAR.exe")
-            return
-        try:
-            # entry 仅作为参数传给 UnRAR，不参与任何路径拼接，天然受压缩包内容限制
-            r = subprocess.run(
-                [unrar, "p", "-p-", "-idq", "-inul", archive, entry],
-                capture_output=True, timeout=600,
-            )
-            if r.returncode != 0:
-                msg = (r.stdout + r.stderr).decode("cp936", "replace") or \
-                      "UnRAR 返回码 %d" % r.returncode
-                handler._send_error_page("解压失败", msg)
-                return
-            data = r.stdout
-            handler.send_response(200)
-            handler.send_header("Content-Type", "application/octet-stream")
-            handler.send_header("Content-Length", str(len(data)))
-            handler.send_header("Content-Disposition", disp)
-            handler.end_headers()
-            handler.wfile.write(data)
-        except Exception as exc:  # noqa: BLE001
-            handler._send_error_page("解压失败", str(exc))
     else:
         handler._send_error_page("解压失败", "不支持的压缩包格式")
 
 
-def _stream_archive(handler, paths):
-    files = [p for p in dict.fromkeys(paths) if os.path.isfile(p)]
-    if not files:
-        handler._send_json({"error": "选中的都是目录或不存在"}, 400)
-        return
-    try:
-        base = os.path.commonpath([os.path.dirname(f) for f in files])
-    except ValueError:
-        base = os.path.splitdrive(files[0])[0] + os.sep
-    rels = [os.path.relpath(f, base) for f in files]
-    winrar = _find_winrar()
-    suffix = ".rar" if winrar else ".zip"
-    fmt_name = "rar" if winrar else "zip"
-    fd, tmp = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    try:
-        os.unlink(tmp)  # 让 Rar/zipfile 创建全新文件
-    except OSError:
-        pass
-    try:
-        if winrar:
-            # Rar.exe 在中文系统上输出 GBK，必须按 cp936 解码
-            r = subprocess.run(
-                [winrar, "a", "-ep1", "-r", "-idq", "-y", tmp, *rels],
-                cwd=base, capture_output=True, text=True,
-                encoding="cp936", errors="replace", timeout=600,
-            )
-            if r.returncode != 0 or not os.path.exists(tmp):
-                raise RuntimeError((r.stdout or "") + (r.stderr or ""))
-        else:
-            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-                for f, rel in zip(files, rels):
-                    zf.write(f, rel)
-        name = "打包下载_%d.%s" % (int(datetime.datetime.now().timestamp()), fmt_name)
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/octet-stream")
-        handler.send_header("Content-Length", str(os.path.getsize(tmp)))
-        handler.send_header(
-            "Content-Disposition",
-            "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
-        )
-        handler.send_header("X-Archive-Format", fmt_name)
-        handler.end_headers()
-        with open(tmp, "rb") as fh:
-            shutil.copyfileobj(fh, handler.wfile)
-    except Exception as exc:  # noqa: BLE001
-        try:
-            handler._send_error_page("打包失败", str(exc))
-        except Exception:  # noqa: BLE001
-            pass
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+# 打包并发限制：同时最多 2 个打包任务（打包是长任务，超出则阻塞等待，可接受）
+_ARCHIVE_SEM = threading.Semaphore(2)
+
+# 压缩级别映射：mode -> (zipfile 压缩方式, compresslevel)
+# store=不压缩（最快，纯拷贝）；fast=zlib 级别 1（快）；normal=默认级别
+_ARCHIVE_MODES = {
+    "store": (zipfile.ZIP_STORED, None),
+    "fast": (zipfile.ZIP_DEFLATED, 1),
+    "normal": (zipfile.ZIP_DEFLATED, None),
+}
 
 
-def _stream_archive_virtual(handler, virtual_items):
-    """把 (虚拟相对路径, 真实绝对路径) 映射打包为 zip，虚拟结构 → 物理结构。
+def _build_archive_items(paths):
+    """ 普通打包：把选中路径组装为 (arcname, realpath) 列表。
 
-    对每个源：
-      * 文件 → 加入待打包清单（虚拟相对路径 + 真实路径）。
-      * 目录 → 递归加入其下所有文件，虚拟相对路径 = 父虚拟路径 + "/" + 子名。
-    去重：同一"虚拟相对路径"只保留首个；若同一真实文件被多个不同虚拟路径引用
-    （复用），保留第一个为真实文件，其余写同名 .lnk 文本条目（内容为真实绝对路径），
-    实现"同一文件只物理存一份，多方引用"。.lnk 仅 zipfile 可方便临时写入，故统一
-    退化为 zip 格式。
+    arcname 为 zip 内相对路径（统一正斜杠分隔），顶层即选中项本身的名字：
+    选中 C:\a\dir1 → "dir1/..."；选中 C:\a\f.txt → "f.txt"；
+    多个选中项并列在 zip 根下。用 realpath 去重同一文件。
     """
-    plan = {}  # 虚拟相对路径 -> {"real": 真实路径, "lnk": bool}
-    order = []
-    seen_real = {}
-    lnk_names = set()  # 已占用的 .lnk 文件名，避免 x.lnk → x.lnk.lnk 或重名
-
-    def gather(vpath, rpath):
-        vpath = vpath.rstrip("/")
-        if os.path.isfile(rpath):
-            if vpath in plan:
-                return
-            if rpath in seen_real:
-                base = vpath + ".lnk"
-                cand = base
-                n = 2
-                while cand in lnk_names or cand in plan:
-                    cand = base[:-4] + " (%d).lnk" % n
-                    n += 1
-                plan[vpath] = {"real": rpath, "lnk": cand}
-                lnk_names.add(cand)
-            else:
-                plan[vpath] = {"real": rpath, "lnk": False}
-                seen_real[rpath] = vpath
-            order.append(vpath)
-            return
-        try:
-            with os.scandir(rpath) as it:
-                for e in it:
-                    gather((vpath + "/" + e.name) if vpath else e.name, e.path)
-        except OSError:
-            pass
-
-    for vpath, rpath in virtual_items:
-        gather(vpath, rpath)
-    if not order:
-        handler._send_json({"error": "选中的都是空目录或不存在"}, 400)
-        return
-    fd, tmp = tempfile.mkstemp(suffix=".zip")
-    os.close(fd)
+    if not paths:
+        return []
     try:
-        os.unlink(tmp)
-    except OSError:
-        pass
-    try:
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for vpath in order:
-                item = plan[vpath]
-                if item["lnk"]:
-                    zf.writestr(item["lnk"], item["real"])
-                else:
-                    zf.write(item["real"], vpath)
-        name = "打包下载_%d.zip" % int(datetime.datetime.now().timestamp())
-        handler.send_response(200)
-        handler.send_header("Content-Type", "application/octet-stream")
-        handler.send_header("Content-Length", str(os.path.getsize(tmp)))
-        handler.send_header(
-            "Content-Disposition",
-            "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
-        )
-        handler.send_header("X-Archive-Format", "zip")
-        handler.end_headers()
-        with open(tmp, "rb") as fh:
-            shutil.copyfileobj(fh, handler.wfile)
-    except Exception as exc:  # noqa: BLE001
+        base = os.path.commonpath([os.path.dirname(p) for p in paths])
+    except ValueError:
+        base = os.path.splitdrive(paths[0])[0] + os.sep
+    items = []
+    seen = set()
+    for p in paths:
         try:
-            handler._send_error_page("打包失败", str(exc))
+            rp = os.path.realpath(p)
         except Exception:  # noqa: BLE001
-            pass
-    finally:
+            continue
+        if rp in seen:
+            continue
+        seen.add(rp)
         try:
-            os.unlink(tmp)
+            rel = os.path.relpath(rp, base)
+        except ValueError:
+            rel = os.path.basename(rp.rstrip("\\/")) or rp
+        if not rel or rel == ".":
+            # 选中项就是 base 本身（如盘符根）时 relpath 得 "."，会产出脏条目 ./，退回用名字
+            rel = os.path.basename(rp.rstrip("\\/")) or rp
+        items.append((rel.replace("\\", "/"), rp))
+    return items
+
+
+def _stream_archive(handler, items, mode="normal"):
+    """统一打包核心：把 (arcname, realpath) 映射打包为 zip 并流式下载。
+
+    items: [(arcname, realpath)]，arcname 为 zip 内相对路径（正斜杠分隔）；
+    目录项会递归展开（含空目录，目录条目也入包），文件项直接写入。
+    mode: "store"（不压缩）/ "fast"（低压缩）/ "normal"（默认压缩）。
+    行为：
+      * 信号量限制同时最多 2 个打包任务，超出则阻塞等待。
+      * 打包前递归估算总大小，临时盘剩余空间不足 → 400。
+      * 读不了的文件/目录跳过并记入响应头 X-Archive-Skipped（URL 编码 JSON）。
+      * 文件全部跳过且没有任何目录条目 → 400 JSON。
+      * 前端断开后捕获写入异常，finally 清理临时文件。
+    """
+    compression, level = _ARCHIVE_MODES.get(mode, _ARCHIVE_MODES["normal"])
+    skipped = []  # 跳过清单：[{path, reason}]，通过 X-Archive-Skipped 响应头返回
+    if not _ARCHIVE_SEM.acquire(blocking=False):
+        # 并发限制：同时最多 2 个打包任务，超出直接拒绝（不让线程无界堆积在排队上）
+        handler._send_json({"error": "已有打包任务进行中，请稍后重试"}, 429)
+        return
+    try:
+        plan = []            # 待打包文件清单 [(arcname, realpath)]
+        dirs = []            # 目录清单 [(arcname, realpath)]（空目录也要写目录条目）
+        visited_dirs = set()  # 已展开目录的 realpath（防 junction/符号链接循环）
+        seen_files = set()    # 已登记文件的 realpath（同一真实文件只入包一次）
+        seen_dirs = set()     # 已登记目录条目的 arcname（重叠选择时不写重复目录条目）
+        total_size = 0        # 文件总大小估算（临时空间预检用）
+
+        def expand(arcname, rpath, depth):
+            # 递归展开目录：目录与文件都登记，visited+depth 双重防循环
+            # 返回 True 表示目录成功扫描（含空目录）；False 表示目录无法读取
+            nonlocal total_size
+            if depth > 64:
+                return True
+            try:
+                real = os.path.realpath(rpath)
+            except Exception:  # noqa: BLE001
+                skipped.append({"path": rpath, "reason": "无法解析路径"})
+                return False
+            if real in visited_dirs:
+                return True
+            visited_dirs.add(real)
+            try:
+                with os.scandir(rpath) as it:
+                    for e in it:
+                        try:
+                            is_dir = e.is_dir(follow_symlinks=False)
+                        except OSError:
+                            is_dir = False
+                        child = (arcname + "/" + e.name) if arcname else e.name
+                        if is_dir:
+                            # 目录：先判重解析点（junction/符号链接目录），命中则不递归。
+                            # junction 的 is_dir(follow_symlinks=False)=True 而 realpath 会解析
+                            # 到目标，若目标在包外会把无关内容打进 zip（隐私/体积风险）
+                            try:
+                                is_reparse = bool(
+                                    e.stat(follow_symlinks=False).st_file_attributes & 0x400
+                                )
+                            except OSError:
+                                is_reparse = False
+                            if is_reparse:
+                                skipped.append({"path": e.path, "reason": "链接目录未包含"})
+                                continue
+                            if child not in seen_dirs:
+                                seen_dirs.add(child)
+                                dirs.append((child, e.path))
+                            expand(child, e.path, depth + 1)
+                        else:
+                            try:
+                                freal = os.path.realpath(e.path)
+                            except Exception:  # noqa: BLE001
+                                freal = e.path
+                            if freal in seen_files:
+                                continue  # 同一真实文件不重复入包
+                            seen_files.add(freal)
+                            plan.append((child, e.path))
+                            try:
+                                total_size += e.stat(follow_symlinks=False).st_size
+                            except OSError:
+                                pass
+                return True
+            except OSError as exc:
+                # scandir 失败：跳过该目录并记录，不再静默
+                skipped.append({"path": rpath, "reason": "目录无法读取: %s" % exc})
+                return False
+
+        for arcname, rpath in items:
+            arcname = arcname.replace("\\", "/").strip("/")
+            if not arcname:
+                arcname = os.path.basename(rpath.rstrip("\\/")) or "item"
+            if os.path.isdir(rpath):
+                # 顶层目录：先展开，扫描成功（含空目录）才登记目录条目；
+                # 无法读取的顶层目录只进 skipped，避免"看似成功"的空 zip 包
+                scanned = expand(arcname, rpath, 0)
+                if scanned and arcname not in seen_dirs:
+                    seen_dirs.add(arcname)
+                    dirs.append((arcname, rpath))
+            elif os.path.isfile(rpath):
+                try:
+                    freal = os.path.realpath(rpath)
+                except Exception:  # noqa: BLE001
+                    freal = rpath
+                if freal in seen_files:
+                    continue
+                seen_files.add(freal)
+                plan.append((arcname, rpath))
+                try:
+                    total_size += os.path.getsize(rpath)
+                except OSError:
+                    pass
+            else:
+                skipped.append({"path": rpath, "reason": "路径不存在或无法访问"})
+
+        # 临时盘剩余空间预检：估算总大小超过剩余空间直接拒绝
+        try:
+            tmp_drive = os.path.splitdrive(tempfile.gettempdir())[0] + os.sep
+            if total_size > shutil.disk_usage(tmp_drive).free:
+                handler._send_json({
+                    "error": "临时空间不足，本次打包需要约 %d MB 可用空间"
+                             % (total_size // (1024 * 1024)),
+                }, 400)
+                return
+        except OSError:
+            pass  # disk_usage 失败不阻塞打包
+
+        # 逐个文件预检：能打开且可读才入包，失败跳过（不终止打包）
+        ok_files = []
+        for arcname, rpath in plan:
+            try:
+                with open(rpath, "rb") as fh:
+                    fh.read(1)
+            except (PermissionError, OSError) as exc:
+                skipped.append({"path": rpath, "reason": "文件无法读取: %s" % exc})
+                continue
+            ok_files.append((arcname, rpath))
+
+        # 一个文件都没打成且没有任何目录条目 → 400
+        if not ok_files and not dirs:
+            handler._send_json({"error": "所有选中项均无法读取"}, 400)
+            return
+
+        fd, tmp = tempfile.mkstemp(suffix=".zip")
+        os.close(fd)
+        try:
+            os.unlink(tmp)  # 让 zipfile 创建全新文件
         except OSError:
             pass
+        try:
+            if level is None:
+                zf = zipfile.ZipFile(tmp, "w", compression)
+            else:
+                zf = zipfile.ZipFile(tmp, "w", compression, compresslevel=level)
+            with zf:
+                # 先写目录条目（external_attr 置 DOS 目录位，保证空目录也进包）
+                for arcname, rpath in dirs:
+                    try:
+                        st = os.stat(rpath)
+                        zinfo = zipfile.ZipInfo(arcname.rstrip("/") + "/")
+                        zinfo.date_time = time.localtime(st.st_mtime)[:6]
+                        zinfo.external_attr = 0x10  # DOS 目录属性位
+                        zf.writestr(zinfo, b"")
+                    except Exception:  # noqa: BLE001
+                        pass  # 目录条目写失败不致命，文件条目继续
+                # 再写文件（预检通过后若仍失败，跳过并记录）
+                for arcname, rpath in ok_files:
+                    try:
+                        zf.write(rpath, arcname)
+                    except Exception as exc:  # noqa: BLE001
+                        skipped.append({"path": rpath, "reason": "写入失败: %s" % exc})
+            name = "打包下载_%d.zip" % int(datetime.datetime.now().timestamp())
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/octet-stream")
+            handler.send_header("Content-Length", str(os.path.getsize(tmp)))
+            handler.send_header(
+                "Content-Disposition",
+                "attachment; filename*=UTF-8''" + urllib.parse.quote(name),
+            )
+            handler.send_header("X-Archive-Format", "zip")
+            if skipped:
+                # 跳过清单 URL 编码 JSON 放响应头，供前端解析展示；
+                # 钳制编码后 ≤8KB（最多 50 条）并附总数头，避免代理/浏览器因响应头超长丢弃响应
+                payload = urllib.parse.quote(
+                    json.dumps(skipped[:50], ensure_ascii=False))
+                if len(payload) > 8000:
+                    payload = payload[:8000]
+                handler.send_header("X-Archive-Skipped", payload)
+                handler.send_header("X-Archive-Skipped-Count", str(len(skipped)))
+            handler.end_headers()
+            with open(tmp, "rb") as fh:
+                shutil.copyfileobj(fh, handler.wfile)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                handler._send_error_page("打包失败", str(exc))
+            except Exception:  # noqa: BLE001
+                pass  # 前端已断开时不再尝试发错误页
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    finally:
+        _ARCHIVE_SEM.release()
 
 
 _CERT_CN = "transfer.local"
@@ -3685,7 +3719,7 @@ def _start(root, port, token=None):
         "roots": roots,
         "port": port,
         "token": token,
-        "archive_format": "rar" if _find_winrar() else "zip",
+        "archive_format": "zip",
         "urls": _urls(port, token),
         "urls_http": _urls_http(port, token),
         "firewall_rule": fw,
@@ -3713,7 +3747,7 @@ drive-mcp 把电脑变成手机可访问的网盘（IPv6 直连 + HTTPS 加密�
   * drive_start(root, port)：启动服务。root 缺省或传 "auto" 时浏览整机所有固定磁盘；
     也可传单个根目录（如 D:\\资料）。
   * drive_pin(paths)：把指定文件/目录置顶到网页显著位置，页面提供「下载」和
-    「打包 .rar 下载」（无 WinRAR 自动用 .zip）按钮。
+    「打包 .zip 下载」按钮。
   * 网页支持：浏览/下载、向当前目录上传文件、置顶。
   * drive_status() / drive_stop()。
   * 无权限的目录会在页面上提示"返回上级"，不会卡死。
@@ -3754,7 +3788,7 @@ def drive_start(root: str = "auto", port: int = DEFAULT_PORT) -> dict:
 @server.tool(
     "drive_pin",
     "把指定文件/文件夹置顶到网页的显著位置（可重复调用追加）。网页上会为每个置顶项"
-    "显示「下载」按钮，并提供「打包下载」按钮（.rar，无 WinRAR 时自动用 .zip）。",
+    "显示「下载」按钮，并提供「打包下载」按钮（.zip）。",
     {
         "type": "object",
         "properties": {
@@ -3800,7 +3834,7 @@ def drive_pin(paths) -> dict:
         "added": added,
         "skipped": skipped,
         "pinned": list(_state["pinned"]),
-        "archive_format": "rar" if _find_winrar() else "zip",
+        "archive_format": "zip",
     }
 
 
@@ -3818,7 +3852,7 @@ def drive_status() -> dict:
         "roots": list(_state["roots"]),
         "port": _state["port"],
         "pinned": list(_state["pinned"]),
-        "archive_format": "rar" if _find_winrar() else "zip",
+        "archive_format": "zip",
         "urls": _urls(_state["port"], _state["token"]),
         "urls_http": _urls_http(_state["port"], _state["token"]),
     }

@@ -178,10 +178,18 @@
     <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
       <span class="fs-6 fw-semibold flex-shrink-0">⭐ 置顶文件</span>
       <div class="d-flex align-items-center gap-2">
-        <button id="packBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
-          <span class="d-none d-sm-inline">📦 打包 .rar 下载</span>
-          <span class="d-inline d-sm-none">📦 打包</span>
-        </button>
+        <div class="btn-group flex-shrink-0" id="packGroup">
+          <button id="packBtn" class="btn btn-outline-primary btn-sm" title="把全部置顶项打包为 zip 下载">
+            <span class="d-none d-sm-inline">📦 打包 .zip 下载</span>
+            <span class="d-inline d-sm-none">📦 打包</span>
+          </button>
+          <button type="button" id="packMenuBtn" class="btn btn-outline-primary btn-sm dropdown-toggle dropdown-toggle-split" data-bs-toggle="dropdown" aria-expanded="false" title="选择压缩级别"></button>
+          <ul class="dropdown-menu dropdown-menu-end">
+            <li><a class="dropdown-item" href="#" data-amode="store">⚡ 最快（不压缩）</a></li>
+            <li><a class="dropdown-item" href="#" data-amode="fast">🚀 快（低压缩）</a></li>
+            <li><a class="dropdown-item" href="#" data-amode="normal">📦 标准（默认）</a></li>
+          </ul>
+        </div>
         <button id="shareAllBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
           <span class="d-none d-sm-inline">🔗 全部分享</span>
           <span class="d-inline d-sm-none">🔗 分享</span>
@@ -202,6 +210,14 @@
   </div>
 
   <div id="alert" class="alert alert-danger py-2 mb-2 d-none"></div>
+
+  <!-- 打包进度条（含取消按钮；打包期间显示） -->
+  <div id="packWrap" class="d-none mb-2">
+    <div class="progress flex-grow-1" style="height:6px" role="progressbar" aria-label="打包进度">
+      <div id="packBar" class="progress-bar progress-bar-striped progress-bar-animated" style="width:0%"></div>
+    </div>
+    <button id="packCancel" class="btn btn-outline-secondary btn-sm flex-shrink-0">取消</button>
+  </div>
 
   <!-- 上传进度条 -->
   <div class="progress d-none mb-2" style="height:4px" role="progressbar" aria-label="上传进度">
