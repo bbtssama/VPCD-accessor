@@ -38,6 +38,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.request
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -4446,22 +4447,85 @@ def _system_proxy_hint(port):
     ) % (server, port)
 
 
+def _cli_bind_retry(root, port, token=None, attempts=3):
+    """启动时 bind 失败（端口未及释放/被其他进程占用）按 3 秒间隔重试 N 次，
+    避免与"刚杀掉的旧实例"在端口释放上赛跑；不相关的错误立即抛出。"""
+    for i in range(1, attempts + 1):
+        try:
+            return _start(root, port, token)
+        except ToolError as exc:
+            msg = "%s" % exc
+            if "10048" not in msg and "被占用" not in msg:
+                raise
+            if i < attempts:
+                sys.stderr.write(
+                    "端口仍被占用，3 秒后重试（第 %d/%d 次）...\n" % (i, attempts))
+                time.sleep(3)
+            else:
+                sys.stderr.write("启动失败: %s\n" % exc)
+                sys.stderr.write(
+                    "提示: 可用 netstat -ano | findstr :%d 查看占用进程，"
+                    "必要时以管理员身份运行启动脚本后重试。\n" % port)
+                raise
+
+
+def _http_probe_ok(port, token):
+    """本地 HTTP 自探测：对 /<token>/api/info 发一次请求，只要服务给出任一
+    HTTP 响应（含 4xx/5xx）都视为"进程在正常处理请求"；连响应都没有才判定
+    假死。返回 True = 服务正常响应。"""
+    try:
+        with urllib.request.urlopen(
+            "http://127.0.0.1:%d/%s/api/info" % (port, token), timeout=3,
+        ) as resp:
+            return resp.status < 500
+    except Exception:  # noqa: BLE001 - 探测失败视为不健康
+        return False
+
+
+def _start_watchdog(port, token):
+    """僵尸监听看门狗：端口还开着但请求无人处理（服务假死）时，进程自动退出，
+    交由启动脚本快速重启——避免"窗口看起来在跑、实际访问不了"的隐蔽失败。"""
+    def _loop():
+        fails = 0
+        while True:
+            time.sleep(10)
+            if _http_probe_ok(port, token):
+                fails = 0
+            else:
+                fails += 1
+            if fails >= 3:
+                sys.stderr.write(
+                    "[watchdog] 本地自探测连续无响应，判定服务僵死（端口仍监听但"
+                    "请求不被处理），自动退出，交由启动脚本重启。\n")
+                os._exit(2)
+    threading.Thread(target=_loop, daemon=True,
+                     name="drive-watchdog").start()
+
+
 def _cli_serve(root, port, token=None):
     try:
-        info = _start(root, port, token)
+        info = _cli_bind_retry(root, port, token)
     except ToolError as exc:
         sys.stderr.write("启动失败: %s\n" % exc)
         sys.exit(1)
     for u in info["urls"]:
-        print(u)
+        print(u, flush=True)
     for u in info.get("urls_http") or []:
-        print(u + "  (HTTP 免证书明文，与 HTTPS 同端口；手机打不开 https 证书页时把 https:// 改成 http://)")
-    print("根目录: %s" % ", ".join(info["roots"]))
-    print("打包格式: %s" % info["archive_format"])
+        print(u + "  (HTTP 免证书明文，与 HTTPS 同端口；手机打不开 https 证书页时把 https:// 改成 http://)", flush=True)
+    print("根目录: %s" % ", ".join(info["roots"]), flush=True)
+    print("打包格式: %s" % info["archive_format"], flush=True)
     hint = _system_proxy_hint(port)
     if hint:
         sys.stderr.write(hint + "\n")
-    print("按 Ctrl+C 停止服务")
+    # 本机自检：确认实际能处理请求，而不是"端口占着但服务没起来"
+    if _http_probe_ok(port, info["token"]):
+        print("本机自检: OK（http://127.0.0.1:%d/%s/ 本地探测返回正常响应）"
+              % (port, info["token"]), flush=True)
+    else:
+        print("本机自检: FAIL（端口已监听但本地请求无响应，自动退出，脚本将快速重启）", flush=True)
+        os._exit(2)
+    _start_watchdog(port, info["token"])
+    print("按 Ctrl+C 停止服务", flush=True)
     try:
         while True:
             threading.Event().wait(3600)

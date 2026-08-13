@@ -885,6 +885,8 @@ function toast(msg) { const t = $("toast"); t.textContent = msg; t.classList.add
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2500); }
 function fmtSize(n) {
   if (n === null || n === undefined) return "";
+  n = Number(n);
+  if (!Number.isFinite(n) || n < 0) return "";   // 防 NaN/Infinity/负值等异常数据
   if (n < 1024) return n + " B";
   if (n < 1048576) return (n / 1024).toFixed(1) + " KB";
   if (n < 1073741824) return (n / 1048576).toFixed(1) + " MB";
@@ -1024,6 +1026,45 @@ function loadingNodeCancel(extraText) {
   d.appendChild(btn);
   return { node: d, btn };
 }
+/**
+ * 通用「可取消异步预览弹窗」骨架：详情/文本/解压/CSV/lnk 五个预览弹窗共用。
+ * 统一处理：建 body + loading 节点 + openModal + 中断上一个预览请求 + 取消按钮，
+ * 以及 AbortError / 加载失败的统一错误展示（与原各函数手写样板行为一致）。
+ * @param {string} title 弹窗标题（通常是文件名）
+ * @param {object} state openModal 的 modalState（刷新恢复用）
+ * @param {string} [loadingText] loading 附加提示（可选）
+ * @param {(ctx: { body: HTMLElement, ac: AbortController, cancelled: () => boolean }) => Promise<void>} loader
+ *   请求用 api(url, { signal: ac.signal })；AbortError / 其它异常由本函数统一展示；
+ *   分片渲染中断可轮询 cancelled()。
+ */
+function openPreviewModal(title, state, loadingText, loader) {
+  const body = document.createElement("div");
+  const ld = loadingNodeCancel(loadingText || "");
+  body.appendChild(ld.node);
+  openModal(title, body, state);
+  const ac = new AbortController();
+  if (_activePreviewAbort) _activePreviewAbort.abort();
+  _activePreviewAbort = ac;
+  let cancelled = false;
+  ac.signal.addEventListener("abort", () => {
+    cancelled = true;
+    // 渲染阶段（loading 节点已移除）取消：清掉半截内容，显示"已取消"
+    if (!body.contains(ld.node)) body.innerHTML = '<p class="muted small">已取消加载</p>';
+  });
+  ld.btn.onclick = () => ac.abort();
+  (async () => {
+    try {
+      await loader({ body, ac, cancelled: () => cancelled });
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        body.innerHTML = '<p class="muted small">已取消加载</p>';
+      } else {
+        body.innerHTML = '<p class="muted">加载失败: ' + esc(e && e.message) + "</p>";
+      }
+    }
+  })();
+  return { body, ac };
+}
 // 文本分片渲染：把大文本按 chunkLen 逐块 append 到目标元素，块间 setTimeout(0) 让出主线程，
 // 期间显示"渲染中…(x%)"；stopFlag() 返回 true（用户取消/弹窗关闭）时立即停止并移除提示。
 function fillTextChunked(target, text, chunkLen, stopFlag) {
@@ -1054,24 +1095,8 @@ function fillTextChunked(target, text, chunkLen, stopFlag) {
 
 // ---------------- 功能 1：文件/目录详情 ----------------
 async function showDetail(path, name) {
-  const body = document.createElement("div");
-  const ld = loadingNodeCancel();
-  body.appendChild(ld.node);
-  openModal(name, body, { type: "detail", path, name });
-  const ac = new AbortController();
-  if (_activePreviewAbort) _activePreviewAbort.abort();
-  _activePreviewAbort = ac;
-  ld.btn.onclick = () => ac.abort();
-  let j;
-  try {
-    j = await api("api/stat?path=" + encodeURIComponent(path), { signal: ac.signal });
-  } catch (e) {
-    body.innerHTML = "";
-    body.innerHTML = (e && e.name === "AbortError")
-      ? '<p class="muted small">已取消加载</p>'
-      : '<p class="muted">加载失败: ' + esc(e && e.message) + "</p>";
-    return;
-  }
+  openPreviewModal(name, { type: "detail", path, name }, null, async ({ body, ac }) => {
+  const j = await api("api/stat?path=" + encodeURIComponent(path), { signal: ac.signal });
   if (j.error) { body.innerHTML = '<p class="muted">' + esc(j.error) + "</p>"; return; }
   body.innerHTML = "";
   const rows = [
@@ -1153,6 +1178,7 @@ async function showDetail(path, name) {
   btns.appendChild(shareBtn);
   if (!j.locked && !j.is_dir) btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(j.path); }));
   if (btns.children.length) body.appendChild(btns);
+  });
 }
 
 // ---------------- 功能 2：视频在线播放 ----------------
@@ -1193,6 +1219,7 @@ function showVideo(path, name) {
   const v = document.createElement("video");
   v.controls = true;
   v.playsinline = true;
+  v.setAttribute("webkit-playsinline", ""); // 老 iOS 兼容：同 playsinline，禁止全屏自动拉起
   v.preload = "metadata";
   v.crossOrigin = "anonymous";
   wrap.appendChild(v);
@@ -2001,7 +2028,7 @@ function renderMarkdown(src) {
     flushCode();
     if (/^\s*$/.test(line)) { flushList(); flushTable(); out.push(""); continue; }
     if (/^\s*(?:---+|\*\*\*+)\s*$/.test(line)) { flushList(); flushTable(); out.push('<hr class="md-hr">'); continue; }
-    const hm = line.match(/^(#{1,3})\s+(.*)$/);   // 标题
+    const hm = line.match(/^(#{1,6})\s+(.*)$/);   // 标题（h1~h6 全支持）
     if (hm) {
       flushList(); flushTable();
       const lv = hm[1].length;
@@ -2042,35 +2069,10 @@ function renderMarkdown(src) {
 }
 
 async function showText(path, name) {
-  const body = document.createElement("div");
-  body._phase = "load";
-  const ld = loadingNodeCancel("文件较大，可能需要一点时间");
-  body.appendChild(ld.node);
-  openModal(name, body, { type: "text", path, name });
-  const ac = new AbortController();
-  if (_activePreviewAbort) _activePreviewAbort.abort();
-  _activePreviewAbort = ac;
-  let cancelled = false;
-  ac.signal.addEventListener("abort", () => {
-    cancelled = true;
-    if (body._phase === "render") body.innerHTML = '<p class="muted small">已取消加载</p>';
-  });
-  ld.btn.onclick = () => ac.abort();
-  let j;
-  try {
-    j = await api("api/read?path=" + encodeURIComponent(path), { signal: ac.signal });
-  } catch (e) {
-    body.innerHTML = "";
-    if (e && e.name === "AbortError") {
-      body.innerHTML = '<p class="muted small">已取消加载</p>';
-    } else {
-      body.innerHTML = '<p class="muted">加载失败: ' + esc(e && e.message) + "</p>";
-    }
-    return;
-  }
-  if (cancelled) return;
+  openPreviewModal(name, { type: "text", path, name }, "文件较大，可能需要一点时间", async ({ body, ac, cancelled }) => {
+  const j = await api("api/read?path=" + encodeURIComponent(path), { signal: ac.signal });
+  if (cancelled()) return;
   if (j.error) { body.innerHTML = '<p class="muted">' + esc(j.error) + "</p>"; return; }
-  body._phase = "render";
   body.innerHTML = "";
   const note = document.createElement("div");
   note.className = "mdl-note";
@@ -2118,14 +2120,14 @@ async function showText(path, name) {
         try { hljs.highlightElement(codeEl); } catch (e) { /* 高亮失败不影响阅读 */ }
       }
     } else {
-      fillTextChunked(codeEl, text, 32768, () => cancelled);
+      fillTextChunked(codeEl, text, 32768, () => cancelled());
     }
   } else {
     // 纯文本：分片渲染，块间让出主线程，用户随时可点 ×/取消
     const pre = document.createElement("pre");
     pre.className = "text-pre";
     holder.appendChild(pre);
-    fillTextChunked(pre, text, 32768, () => cancelled);
+    fillTextChunked(pre, text, 32768, () => cancelled());
   }
   body.appendChild(holder);
   if (bigNote) body.appendChild(bigNote);
@@ -2139,28 +2141,13 @@ async function showText(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  });
 }
 
 // ---------------- 功能 4：压缩包在线解压 ----------------
 async function showUnpack(path, name) {
-  const body = document.createElement("div");
-  const ld = loadingNodeCancel();
-  body.appendChild(ld.node);
-  openModal(name, body, { type: "unpack", path, name });
-  const ac = new AbortController();
-  if (_activePreviewAbort) _activePreviewAbort.abort();
-  _activePreviewAbort = ac;
-  ld.btn.onclick = () => ac.abort();
-  let j;
-  try {
-    j = await api("api/unpack?path=" + encodeURIComponent(path), { signal: ac.signal });
-  } catch (e) {
-    body.innerHTML = "";
-    body.innerHTML = (e && e.name === "AbortError")
-      ? '<p class="muted small">已取消加载</p>'
-      : '<p class="muted">加载失败: ' + esc(e && e.message) + "</p>";
-    return;
-  }
+  openPreviewModal(name, { type: "unpack", path, name }, null, async ({ body, ac }) => {
+  const j = await api("api/unpack?path=" + encodeURIComponent(path), { signal: ac.signal });
   body.innerHTML = "";
   if (j.error) { body.innerHTML = '<p class="muted">' + esc(j.error) + "</p>"; return; }
   if (j.format === "unsupported") {
@@ -2204,6 +2191,7 @@ async function showUnpack(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载压缩包本身", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  });
 }
 
 async function api(ep, opt) {
@@ -2317,7 +2305,9 @@ function renderPinned() {
   pinned.forEach(p => { if (p.is_dir) hasDir = true; else total += (p.size || 0); });
   const sizeTxt = n ? fmtSize(total) + (hasDir ? " · 含目录" : "") : "—";
   $("pinnedHeadTitle").textContent = "📌 置顶文件 · " + n + " 项 · 共 " + sizeTxt;
-  $("pinnedChevron").textContent = $("pinnedList").classList.contains("pinned-fold") ? "▶" : "▼";
+  const pinnedFolded = $("pinnedList").classList.contains("pinned-fold");
+  $("pinnedChevron").textContent = pinnedFolded ? "▶" : "▼";
+  $("pinnedHead").setAttribute("aria-expanded", String(!pinnedFolded));
   $("pinCount").textContent = n + " 个";
   if (!pinned.length) { box.innerHTML = '<div class="empty" style="padding:14px 0">暂无置顶文件</div>'; return; }
   box.innerHTML = "";
@@ -2343,11 +2333,16 @@ function renderPinned() {
   });
 }
 
-// 置顶折叠头：点击展开/收起（chevron 同步）
+// 置顶折叠头：点击展开/收起（chevron + aria-expanded 同步）
 $("pinnedHead").onclick = () => {
   const box = $("pinnedList");
   const fold = box.classList.toggle("pinned-fold");
   $("pinnedChevron").textContent = fold ? "▶" : "▼";
+  $("pinnedHead").setAttribute("aria-expanded", String(!fold));
+};
+// 键盘可达：role="button" 语义要求 Enter / Space 等效点击（tabindex 见 index.html）
+$("pinnedHead").onkeydown = (ev) => {
+  if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); $("pinnedHead").click(); }
 };
 
 function renderBreadcrumb() {
@@ -2405,8 +2400,12 @@ function renderBreadcrumb() {
   };
   if (cur !== activeRoot) addSeg("🏠", activeRoot);
   parts.forEach((part, i) => {
+    // acc 拼接与后端 os.path.join 一致（单反斜杠分隔）：
+    // i=0 首段带尾斜杠（F:\）；后续段仅在缺分隔符时补一个反斜杠，
+    // 保证任意层级（2 层 / 3 层 / 深层）下最后一段 acc === cur 都成立，
+    // 从而末级目录只由 last 高亮渲染一次（修复重复显示 + 深层路径断连）
     if (i === 0) acc = part + "\\";
-    else acc += "\\" + part;
+    else acc += (acc.endsWith("\\") ? "" : "\\") + part;
     if (acc === cur) return;
     addSeg(part, acc);
   });
@@ -3018,6 +3017,19 @@ $("viewBtn").onclick = toggleSidebar;
 $("sidebarClose").onclick = closeSidebar;
 $("sidebarMask").onclick = closeSidebar;
 document.addEventListener("keydown", e => { if (e.key === "Escape" && sidebarOpen) closeSidebar(); });
+// 移动端键盘避让：iOS 弹出键盘时 visualViewport 高度缩小，抬升侧边栏底部按钮（重置筛选）免被遮挡
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const adjustSidebarFoot = () => {
+    const foot = document.querySelector(".sidebar-foot");
+    if (!foot) return;
+    const kbH = Math.max(0, window.innerHeight - vv.height); // 键盘遮挡高度
+    // 遮挡超过 60px 才认为键盘弹出（规避 resize 抖动）；关闭侧边栏即复位
+    foot.style.paddingBottom = (sidebarOpen && kbH > 60) ? "calc(1rem + " + kbH + "px)" : "";
+  };
+  vv.addEventListener("resize", adjustSidebarFoot);
+  vv.addEventListener("scroll", adjustSidebarFoot);
+}
 // 视图切换（radio 式按钮组）
 $("viewListBtn").onclick = () => setView("list");
 $("viewGridBtn").onclick = () => setView("grid");
@@ -3425,7 +3437,7 @@ function renderTask(t) {
           '<span class="badge text-bg-secondary flex-shrink-0">' + modeLabel + "</span>" +
           '<span class="small flex-shrink-0">' + st.label + "</span>" +
           '<button class="btn btn-outline-secondary btn-sm py-0 px-1 flex-shrink-0" title="删除任务" ' +
-              'onclick="removeTask(\'' + t.task_id + '\')">✕</button>' +
+              'onclick="removeTask(\'' + esc(t.task_id) + '\')">✕</button>' +
           "</div>";
   card += '<div class="progress' + (st.idle ? " pk-idle-track" : "") + '" style="height:6px" role="progressbar" aria-valuenow="' + st.pct + '" aria-valuemin="0" aria-valuemax="100">' +
           '<div class="progress-bar' + (st.striped ? " progress-bar-striped progress-bar-animated" : "") +
@@ -3439,7 +3451,7 @@ function renderTask(t) {
       card += '<div class="border-top pt-1 mt-1">' +
               '<div class="small text-warning">⚠️ 经域名下载大包可能触发网关超时，建议直连</div>' +
               '<div class="d-flex justify-content-end">' +
-              '<button class="btn btn-sm btn-outline-primary py-0" onclick="copyDirectDl(\'' + t.task_id + '\')">📋 复制直连下载链接</button>' +
+              '<button class="btn btn-sm btn-outline-primary py-0" onclick="copyDirectDl(\'' + esc(t.task_id) + '\')">📋 复制直连下载链接</button>' +
               "</div></div>";
     }
   } else if (st.detail) {
@@ -3456,7 +3468,7 @@ function renderTask(t) {
 function toggleSkip(btn) {
   const card = btn.closest(".pk-task");
   const wrap = card.querySelector(".pk-skiplist");
-  if (wrap) { wrap.remove(); btn.textContent = "⚠ 跳过 " + (card.dataset.skips || "") + " 项 ▾"; return; }
+  if (wrap) { wrap.remove(); btn.textContent = "⚠ 跳过 " + btn.dataset.skips + " 项 ▾"; return; }
   const id = card.dataset.id;
   fetch(BASE + "api/archive?id=" + encodeURIComponent(id))
     .then(r => r.json())
@@ -3468,7 +3480,7 @@ function toggleSkip(btn) {
         "<div>· " + esc(k.path) + "（" + esc(k.reason) + "）</div>").join("");
       btn.parentElement.appendChild(div);
       btn.textContent = "⚠ 跳过 " + j.task.skipped.length + " 项 ▴";
-      card.dataset.skips = j.task.skipped.length;
+      btn.dataset.skips = j.task.skipped.length;   // 计数存按钮自身（轮询重建后仍可正确收起）
     })
     .catch(() => { /* 静默 */ });
 }
@@ -3564,11 +3576,18 @@ function createPackPreview() {
   }).join("");
 }
 
-// 目录统计预览：点击 ▶ 拉 child_count/child_bytes 行内展示
+// 目录统计预览：点击 ▶ 拉 child_count/child_bytes 行内展示；再点 ▼ 收起恢复
 function previewDir(btn) {
   const row = btn.closest(".pk-prow");
   const path = row.dataset.dir;
   if (!path) return;
+  const sizeEl = row.querySelector(".pk-size");
+  if (!sizeEl) return;
+  if (btn.textContent === "▼") {                    // 已展开：点击收起
+    btn.textContent = "▶";
+    if (row.dataset.origSize !== undefined) sizeEl.textContent = row.dataset.origSize;
+    return;
+  }
   btn.disabled = true;
   fetch(BASE + "api/archive/preview?paths=" + encodeURIComponent(path))
     .then(r => r.json())
@@ -3576,14 +3595,11 @@ function previewDir(btn) {
       btn.disabled = false;
       if (!j || !j.items || !j.items.length) return;
       const it = j.items[0];
-      const sizeEl = row.querySelector(".pk-size");
-      if (sizeEl) {
-        sizeEl.textContent = it.child_count === -1
-          ? "▶ 统计失败（无权限）"
-          : "▶ " + it.child_count + " 个子项 · 共 " + fmtSize(it.child_bytes);
-      }
-      const was = btn.textContent;
-      btn.textContent = was === "▶" ? "▼" : was;   // 展开态标记
+      if (row.dataset.origSize === undefined) row.dataset.origSize = sizeEl.textContent;  // 记住原大小便于收起
+      sizeEl.textContent = it.child_count === -1
+        ? "▶ 统计失败（无权限）"
+        : "▶ " + it.child_count + " 个子项 · 共 " + fmtSize(it.child_bytes);
+      btn.textContent = "▼";
     })
     .catch(() => { btn.disabled = false; });
 }
@@ -3683,25 +3699,24 @@ $("fileInput").onchange = async (ev) => {
   loadList(cur);
 };
 
-init();
-
 // ---------------- 功能 7：编程文件扩展名（语法高亮 + 图标映射共用） ----------------
 const CODE_EXT = ["json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","sql"];
 
 // ---------------- 功能 8：文件类型专用图标（iconOf / iconUrl） ----------------
+// 图标与 fileKind 预览行为保持一致（审计 P3-4：bat/svg 曾与预览分类不符）
 function iconOf(name) {
   const e = extOf(name);
   if (e === "iso") return "iso";
   if (e === "lnk") return "lnk";
   if (VIDEO_EXT.indexOf(e) >= 0) return "video";
-  if (["jpg","jpeg","png","gif","webp","bmp","svg"].indexOf(e) >= 0) return "image";
+  if (["jpg","jpeg","png","gif","webp","bmp"].indexOf(e) >= 0) return "image";
   if (["mp3","flac","wav","m4a","ogg","aac"].indexOf(e) >= 0) return "audio";
   if (["zip","rar","7z","tar","gz"].indexOf(e) >= 0) return "archive";
   if (["doc","docx"].indexOf(e) >= 0) return "doc";
   if (["xls","xlsx","csv"].indexOf(e) >= 0) return "sheet";
-  if (["exe","msi","bat"].indexOf(e) >= 0) return "exe";
-  if (CODE_EXT.indexOf(e) >= 0) return "code";
-  if (["txt","md","markdown","log"].indexOf(e) >= 0) return "text";
+  if (["exe","msi"].indexOf(e) >= 0) return "exe";
+  if (CODE_EXT.indexOf(e) >= 0) return "code";                 // 含 bat：脚本按文本预览，用 code 图标
+  if (["txt","md","markdown","log","svg"].indexOf(e) >= 0) return "text";  // svg 文本预览（TEXT_EXT），用 text 图标
   return "file";
 }
 // 图标 URL（目录/锁定由调用方特判，这里只负责普通文件）
@@ -3763,24 +3778,8 @@ function parseCsv(text) {
 }
 
 async function showCsv(path, name) {
-  const body = document.createElement("div");
-  const ld = loadingNodeCancel("文件较大，可能需要一点时间");
-  body.appendChild(ld.node);
-  openModal(name, body, { type: "csv", path, name });
-  const ac = new AbortController();
-  if (_activePreviewAbort) _activePreviewAbort.abort();
-  _activePreviewAbort = ac;
-  ld.btn.onclick = () => ac.abort();
-  let j;
-  try {
-    j = await api("api/read?path=" + encodeURIComponent(path), { signal: ac.signal });
-  } catch (e) {
-    body.innerHTML = "";
-    body.innerHTML = (e && e.name === "AbortError")
-      ? '<p class="muted small">已取消加载</p>'
-      : '<p class="muted">加载失败: ' + esc(e && e.message) + "</p>";
-    return;
-  }
+  openPreviewModal(name, { type: "csv", path, name }, "文件较大，可能需要一点时间", async ({ body, ac }) => {
+  const j = await api("api/read?path=" + encodeURIComponent(path), { signal: ac.signal });
   if (j.error) { body.innerHTML = '<p class="muted">' + esc(j.error) + "</p>"; return; }
   body.innerHTML = "";
   const note = document.createElement("div");
@@ -3824,6 +3823,7 @@ async function showCsv(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  });
 }
 
 // ---------------- 功能 4：PDF 在线预览 ----------------
@@ -3853,23 +3853,12 @@ function showPdf(path, name) {
 
 // ---------------- 功能 5：.lnk 快捷方式跳转（跳到目标位置而非直接打开） ----------------
 async function showLnk(path, name) {
-  const body = document.createElement("div");
-  const ld = loadingNodeCancel();
-  body.appendChild(ld.node);
-  openModal(name, body, { type: "lnk", path, name });
-  const ac = new AbortController();
-  if (_activePreviewAbort) _activePreviewAbort.abort();
-  _activePreviewAbort = ac;
-  ld.btn.onclick = () => ac.abort();
+  openPreviewModal(name, { type: "lnk", path, name }, null, async ({ body, ac }) => {
   let j;
   try {
     j = await api("api/lnk?path=" + encodeURIComponent(path), { signal: ac.signal });
   } catch (e) {
-    body.innerHTML = "";
-    if (e && e.name === "AbortError") {
-      body.innerHTML = '<p class="muted small">已取消加载</p>';
-      return;
-    }
+    if (e && e.name === "AbortError") throw e;   // 取消：交包装层统一显示
     j = { ok: false, error: "请求失败：" + e.message };
   }
   body.innerHTML = "";
@@ -3900,48 +3889,49 @@ async function showLnk(path, name) {
   }
   btns.appendChild(mkBtn("⬇ 下载快捷方式本身", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  });
 }
 
-// ---------------- 功能 9：再分享 ----------------
-// 主模式：创建新分享（选 1/24/72/168 小时有效期）。
-// 分享模式（sub 模式）：二次分享，与当前分享共享同一个过期时间（不选新有效期）。
-function showShareDialog(path, name, opts) {
-  const sub = !!(opts && opts.sub);
+// ---------------- 功能 9：分享 ----------------
+/**
+ * 分享弹窗公共工厂：单文件分享 / 全部分享 / 二次分享 三个弹窗共用
+ * 「表单 → 生成中… → 失败重试 / 成功展示链接 + 打开/复制」骨架（审计 P2：三处重复代码）。
+ * @param {object} opts
+ *   title     弹窗标题
+ *   headHtml  表单上方说明区 HTML（文件名 / 数量提示等，需已转义）
+ *   formHtml  表单区 HTML（有效期 radio 组等；可为空）
+ *   genLabel  「生成链接」按钮文案
+ *   gen       异步生成函数：返回 { ok, url, name?, expires_at?, msg?, note? }；
+ *             失败返回 { error } 或抛异常（msg/note 为纯文本，工厂统一转义）
+ */
+function buildShareModal({ title, headHtml, formHtml, genLabel, gen }) {
   const body = document.createElement("div");
-  if (sub) return showSubShareDialog(path, name);
-  openModal("创建分享链接", body, null); // 分享弹窗不参与刷新恢复
+  openModal(title, body, null); // 分享弹窗不参与刷新恢复
   body.innerHTML =
-    '<div class="mb-2 text-truncate" title="' + esc(name) + '">' + esc(name) + "</div>" +
-    '<div class="mb-3">' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh1" value="1"><label class="form-check-label" for="sh1">1 小时</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh24" value="24" checked><label class="form-check-label" for="sh24">1 天</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh72" value="72"><label class="form-check-label" for="sh72">3 天</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh168" value="168"><label class="form-check-label" for="sh168">7 天</label></div>' +
-    "</div>" +
-    '<button class="btn btn-primary w-100" id="shareGen">生成链接</button>';
+    (headHtml || "") +
+    (formHtml || "") +
+    '<button class="btn btn-primary w-100" id="shareGen">' + genLabel + "</button>";
   const genBtn = $("shareGen");
+  const failHtml = (msg) => {
+    body.innerHTML = '<div class="alert alert-danger py-2 mb-2">' + esc(msg) + "</div>" +
+      '<button class="btn btn-primary w-100" id="shareGen">重试</button>';
+    $("shareGen").onclick = () => buildShareModal({ title, headHtml, formHtml, genLabel, gen });
+  };
   genBtn.onclick = async () => {
-    const checked = document.querySelector('input[name="shareHours"]:checked');
-    const hours = checked ? checked.value : "24";
     genBtn.disabled = true;
     genBtn.textContent = "生成中…";
-    const failHtml = (msg) => {
-      body.innerHTML = '<div class="alert alert-danger py-2 mb-2">' + esc(msg) + "</div>" +
-        '<button class="btn btn-primary w-100" id="shareGen">重试</button>';
-      $("shareGen").onclick = () => showShareDialog(path, name);
-    };
     try {
-      const j = await api("api/share?path=" + encodeURIComponent(path) + "&hours=" + hours);
-      if (j.error || !j.ok) { failHtml(j.error || "生成失败"); return; }
+      const j = await gen();
+      if (!j || j.error || !j.ok) { failHtml((j && j.error) || "生成失败"); return; }
       const fullUrl = location.origin + j.url;
       body.innerHTML =
-        '<div class="alert alert-success py-2 mb-2">分享链接已生成（' + esc(j.name || name) + "）</div>" +
+        '<div class="alert alert-success py-2 mb-2">' + esc(j.msg || "分享链接已生成") + "</div>" +
         '<div class="p-2 bg-body-secondary rounded mb-3" id="shareUrl" style="word-break:break-all;font-size:13px;user-select:all">' + esc(fullUrl) + "</div>" +
         '<div class="d-flex flex-wrap gap-2">' +
         '  <button class="btn btn-primary flex-fill" id="shareOpen">🌐 打开分享页</button>' +
         '  <button class="btn btn-outline-primary flex-fill" id="shareCopy">📋 复制链接</button>' +
         "</div>" +
-        '<div class="small text-muted mt-2">有效期至 ' + fmtTime(j.expires_at) + "</div>";
+        '<div class="small text-muted mt-2">' + esc(j.note || "") + "</div>";
       $("shareOpen").onclick = () => { window.open(fullUrl); };
       $("shareCopy").onclick = () => {
         const txt = $("shareUrl").textContent;
@@ -3964,119 +3954,68 @@ function showShareDialog(path, name, opts) {
       failHtml("请求失败：" + e.message);
     }
   };
+  return { body };
+}
+// 主模式：创建新分享（选 1/24/72/168 小时有效期）。
+// 分享模式（sub 模式）：二次分享，与当前分享共享同一个过期时间（不选新有效期）。
+function showShareDialog(path, name, opts) {
+  if (opts && opts.sub) return showSubShareDialog(path, name);
+  buildShareModal({
+    title: "创建分享链接",
+    headHtml: '<div class="mb-2 text-truncate" title="' + esc(name) + '">' + esc(name) + "</div>",
+    formHtml: '<div class="mb-3">' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh1" value="1"><label class="form-check-label" for="sh1">1 小时</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh24" value="24" checked><label class="form-check-label" for="sh24">1 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh72" value="72"><label class="form-check-label" for="sh72">3 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareHours" id="sh168" value="168"><label class="form-check-label" for="sh168">7 天</label></div>' +
+      "</div>",
+    genLabel: "生成链接",
+    gen: async () => {
+      const checked = document.querySelector('input[name="shareHours"]:checked');
+      const hours = checked ? checked.value : "24";
+      const j = await api("api/share?path=" + encodeURIComponent(path) + "&hours=" + hours);
+      return { ...j, msg: "分享链接已生成（" + (j.name || name) + "）", note: "有效期至 " + fmtTime(j.expires_at) };
+    },
+  });
 }
 
 // ---------------- 功能 9：全部分享（一次把全部置顶文件生成分享链接） ----------------
 // 有效期选择 UI 与单文件分享一致（radio 1/24/72/168，默认 24），
 // 后端契约：api/share?paths=<p1>|<p2>|<p3>&hours=<h>（paths 每项 encodeURIComponent，整体再 encode 一次）
 function showShareManyDialog() {
-  const body = document.createElement("div");
-  openModal("全部分享", body, null); // 分享弹窗不参与刷新恢复
-  body.innerHTML =
-    '<div class="mb-2 text-truncate">共 ' + pinned.length + ' 个置顶文件将生成分享链接</div>' +
-    '<div class="mb-3">' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm1" value="1"><label class="form-check-label" for="sm1">1 小时</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm24" value="24" checked><label class="form-check-label" for="sm24">1 天</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm72" value="72"><label class="form-check-label" for="sm72">3 天</label></div>' +
-    '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm168" value="168"><label class="form-check-label" for="sm168">7 天</label></div>' +
-    "</div>" +
-    '<button class="btn btn-primary w-100" id="shareManyGen">生成链接</button>';
-  const genBtn = $("shareManyGen");
-  genBtn.onclick = async () => {
-    const checked = document.querySelector('input[name="shareManyHours"]:checked');
-    const hours = checked ? checked.value : "24";
-    genBtn.disabled = true;
-    genBtn.textContent = "生成中…";
-    const failHtml = (msg) => {
-      body.innerHTML = '<div class="alert alert-danger py-2 mb-2">' + esc(msg) + "</div>" +
-        '<button class="btn btn-primary w-100" id="shareManyGen">重试</button>';
-      $("shareManyGen").onclick = () => showShareManyDialog();
-    };
-    try {
+  buildShareModal({
+    title: "全部分享",
+    headHtml: '<div class="mb-2 text-truncate">共 ' + pinned.length + ' 个置顶文件将生成分享链接</div>',
+    formHtml: '<div class="mb-3">' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm1" value="1"><label class="form-check-label" for="sm1">1 小时</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm24" value="24" checked><label class="form-check-label" for="sm24">1 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm72" value="72"><label class="form-check-label" for="sm72">3 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="shareManyHours" id="sm168" value="168"><label class="form-check-label" for="sm168">7 天</label></div>' +
+      "</div>",
+    genLabel: "生成链接",
+    gen: async () => {
+      const checked = document.querySelector('input[name="shareManyHours"]:checked');
+      const hours = checked ? checked.value : "24";
       const pathsParam = pinned.map(p => p.path).join("|");
       const j = await api("api/share?paths=" + encodeURIComponent(pathsParam) + "&hours=" + hours);
-      if (j.error || !j.ok) { failHtml(j.error || "生成失败"); return; }
-      const fullUrl = location.origin + j.url;
-      body.innerHTML =
-        '<div class="alert alert-success py-2 mb-2">分享链接已生成（' + pinned.length + ' 个文件）</div>' +
-        '<div class="p-2 bg-body-secondary rounded mb-3" id="shareManyUrl" style="word-break:break-all;font-size:13px;user-select:all">' + esc(fullUrl) + "</div>" +
-        '<div class="d-flex flex-wrap gap-2">' +
-        '  <button class="btn btn-primary flex-fill" id="shareManyOpen">🌐 打开分享页</button>' +
-        '  <button class="btn btn-outline-primary flex-fill" id="shareManyCopy">📋 复制链接</button>' +
-        "</div>" +
-        '<div class="small text-muted mt-2">有效期至 ' + fmtTime(j.expires_at) + "</div>";
-      $("shareManyOpen").onclick = () => { window.open(fullUrl); };
-      $("shareManyCopy").onclick = () => {
-        const txt = $("shareManyUrl").textContent;
-        const ok = () => toast("链接已复制");
-        const fallback = () => {
-          // 降级方案：选中文本 + execCommand("copy")
-          const sel = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents($("shareManyUrl"));
-          sel.removeAllRanges();
-          sel.addRange(range);
-          try { document.execCommand("copy"); ok(); }
-          catch (e) { toast("复制失败，请长按手动复制"); }
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(txt).then(ok).catch(fallback);
-        } else fallback();
-      };
-    } catch (e) {
-      failHtml("请求失败：" + e.message);
-    }
-  };
+      return { ...j, msg: "分享链接已生成（" + pinned.length + " 个文件）", note: "有效期至 " + fmtTime(j.expires_at) };
+    },
+  });
 }
 
 // 二次分享（分享模式）：直接调 api/sharesub，不弹有效期选择，与父分享同步过期
-async function showSubShareDialog(path, name) {
-  const body = document.createElement("div");
-  openModal("二次分享", body, null); // 分享弹窗不参与刷新恢复
-  body.innerHTML =
-    '<div class="mb-2 text-truncate" title="' + esc(name) + '">' + esc(name) + "</div>" +
-    '<div class="small text-muted mb-3">二次分享 · 与当前分享同步过期</div>' +
-    '<button class="btn btn-primary w-100" id="subGen">生成链接</button>';
-  const genBtn = $("subGen");
-  genBtn.onclick = async () => {
-    genBtn.disabled = true;
-    genBtn.textContent = "生成中…";
-    const failHtml = (msg) => {
-      body.innerHTML = '<div class="alert alert-danger py-2 mb-2">' + esc(msg) + "</div>" +
-        '<button class="btn btn-primary w-100" id="subGen">重试</button>';
-      $("subGen").onclick = () => showSubShareDialog(path, name);
-    };
-    try {
+function showSubShareDialog(path, name) {
+  buildShareModal({
+    title: "二次分享",
+    headHtml: '<div class="mb-2 text-truncate" title="' + esc(name) + '">' + esc(name) + "</div>" +
+              '<div class="small text-muted mb-3">二次分享 · 与当前分享同步过期</div>',
+    genLabel: "生成链接",
+    gen: async () => {
       const j = await api("api/sharesub?path=" + encodeURIComponent(path));
-      if (j.error || !j.ok) { failHtml(j.error || "生成失败"); return; }
-      const fullUrl = location.origin + j.url;
-      body.innerHTML =
-        '<div class="alert alert-success py-2 mb-2">二次分享链接已生成（' + esc(j.name || name) + "）</div>" +
-        '<div class="p-2 bg-body-secondary rounded mb-3" id="shareUrl" style="word-break:break-all;font-size:13px;user-select:all">' + esc(fullUrl) + "</div>" +
-        '<div class="d-flex flex-wrap gap-2">' +
-        '  <button class="btn btn-primary flex-fill" id="shareOpen">🌐 打开分享页</button>' +
-        '  <button class="btn btn-outline-primary flex-fill" id="shareCopy">📋 复制链接</button>' +
-        "</div>" +
-        '<div class="small text-muted mt-2">与当前分享同步过期（' + fmtTime(j.expires_at) + "）</div>";
-      $("shareOpen").onclick = () => { window.open(fullUrl); };
-      $("shareCopy").onclick = () => {
-        const txt = $("shareUrl").textContent;
-        const ok = () => toast("链接已复制");
-        const fallback = () => {
-          const sel = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents($("shareUrl"));
-          sel.removeAllRanges();
-          sel.addRange(range);
-          try { document.execCommand("copy"); ok(); }
-          catch (e) { toast("复制失败，请长按手动复制"); }
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(txt).then(ok).catch(fallback);
-        } else fallback();
-      };
-    } catch (e) {
-      failHtml("请求失败：" + e.message);
-    }
-  };
+      return { ...j, msg: "二次分享链接已生成（" + (j.name || name) + "）", note: "与当前分享同步过期（" + fmtTime(j.expires_at) + "）" };
+    },
+  });
 }
+
+// 启动入口：放在文件最末尾，确保上方所有 const/function 均已初始化（根治 TDZ）
+init();

@@ -13,3 +13,6 @@ static/thumbs/
 build/
 dist/
 *.spec
+
+# Playwright 自动化测试残留（控制台日志/页面快照）
+.playwright-mcp/

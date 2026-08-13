@@ -4,21 +4,166 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>电脑网盘</title>
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%3E%3Crect%20width='24'%20height='24'%20rx='5'%20fill='%232563eb'/%3E%3Cpath%20d='M18%2010h-1.26A8%208%200%201%200%209%2020h9a5%205%200%200%200%200-10z'%20fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="static/bootstrap.min.css">
 <link rel="stylesheet" href="static/highlight.min.css">
 <style>
-  /* 品牌蓝：直接覆盖 Bootstrap primary 变量，让按钮/高亮整体统一 */
+  /* ========== 品牌色变量层 ==========
+     克制基调：#2563eb 蓝（primary）+ #f3f4f6 灰（页面底）。
+     组件颜色一律由 --brand-* 派生为 Bootstrap 语义变量（--bs-*），
+     按钮 / badge / progress / text-muted / 边框因此整体统一；
+     浅色 / 深色模式只翻变量层，组件样式零改动。 */
   :root {
-    --bs-primary: #2563eb;
-    --bs-primary-rgb: 37, 99, 235;
+    /* 品牌基础色（primary/success/info/warning/danger + subtle/emphasis 变体） */
+    --brand-primary: #2563eb;
+    --brand-primary-rgb: 37, 99, 235;
+    --brand-primary-subtle: #dbeafe;
+    --brand-primary-emphasis: #1e40af;
+    --brand-success: #16a34a;
+    --brand-success-rgb: 22, 163, 74;
+    --brand-success-subtle: #dcfce7;
+    --brand-success-emphasis: #15803d;
+    --brand-info: #0891b2;
+    --brand-info-rgb: 8, 145, 178;
+    --brand-info-subtle: #cffafe;
+    --brand-info-emphasis: #155e75;
+    --brand-warning: #d97706;
+    --brand-warning-rgb: 217, 119, 6;
+    --brand-warning-subtle: #fef3c7;
+    --brand-warning-emphasis: #b45309;
+    --brand-danger: #dc2626;
+    --brand-danger-rgb: 220, 38, 38;
+    --brand-danger-subtle: #fee2e2;
+    --brand-danger-emphasis: #b91c1c;
+    /* 中性面：页面底 / 面板面 / 边框 / 正文 / 弱化文字 */
+    --brand-bg: #f3f4f6;
+    --brand-surface: #ffffff;
+    --brand-border: #e5e7eb;
+    --brand-text: #111827;
+    --brand-text-muted: #6b7280;
+    /* Bootstrap 语义映射 */
+    --bs-primary: var(--brand-primary);
+    --bs-primary-rgb: var(--brand-primary-rgb);
+    --bs-primary-bg-subtle: var(--brand-primary-subtle);
+    --bs-primary-border-subtle: #93c5fd;
+    --bs-primary-text-emphasis: var(--brand-primary-emphasis);
+    --bs-success: var(--brand-success);
+    --bs-success-rgb: var(--brand-success-rgb);
+    --bs-success-bg-subtle: var(--brand-success-subtle);
+    --bs-success-border-subtle: #86efac;
+    --bs-success-text-emphasis: var(--brand-success-emphasis);
+    --bs-info: var(--brand-info);
+    --bs-info-rgb: var(--brand-info-rgb);
+    --bs-info-bg-subtle: var(--brand-info-subtle);
+    --bs-info-border-subtle: #67e8f9;
+    --bs-info-text-emphasis: var(--brand-info-emphasis);
+    --bs-warning: var(--brand-warning);
+    --bs-warning-rgb: var(--brand-warning-rgb);
+    --bs-warning-bg-subtle: var(--brand-warning-subtle);
+    --bs-warning-border-subtle: #fcd34d;
+    --bs-warning-text-emphasis: var(--brand-warning-emphasis);
+    --bs-danger: var(--brand-danger);
+    --bs-danger-rgb: var(--brand-danger-rgb);
+    --bs-danger-bg-subtle: var(--brand-danger-subtle);
+    --bs-danger-border-subtle: #fecaca;
+    --bs-danger-text-emphasis: var(--brand-danger-emphasis);
+    --bs-body-bg: var(--brand-surface);        /* card/modal/list-group 的默认底色 */
+    --bs-body-color: var(--brand-text);
+    --bs-body-font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    --bs-secondary-color: var(--brand-text-muted);   /* text-muted / 次要文字 */
+    --bs-secondary-bg: #e5e7eb;
+    --bs-tertiary-bg: #e9edf2;                /* hover/内嵌面（略深于页面底，保证 hover 可见） */
+    --bs-border-color: var(--brand-border);
+    --bs-secondary-border-subtle: #d1d5db;
+    --bs-link-color: var(--brand-primary);
+    --bs-link-hover-color: var(--brand-primary-emphasis);
+    --bs-progress-bg: #e5e7eb;
+    --bs-progress-bar-bg: var(--bs-primary);  /* 进度条从默认蓝统一到品牌蓝 */
   }
+
+  /* 深色模式：prefers-color-scheme 整层翻转（组件全部走 --bs-*，无需单独适配） */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --brand-primary: #3b82f6;               /* 深底上提亮一档保证对比度 */
+      --brand-primary-rgb: 59, 130, 246;
+      --brand-primary-subtle: #1e3a8a;
+      --brand-primary-emphasis: #93c5fd;
+      --brand-success: #22c55e;
+      --brand-success-rgb: 34, 197, 94;
+      --brand-success-subtle: #14532d;
+      --brand-success-emphasis: #86efac;
+      --brand-info: #06b6d4;
+      --brand-info-rgb: 6, 182, 212;
+      --brand-info-subtle: #164e63;
+      --brand-info-emphasis: #67e8f9;
+      --brand-warning: #f59e0b;
+      --brand-warning-rgb: 245, 158, 11;
+      --brand-warning-subtle: #78350f;
+      --brand-warning-emphasis: #fcd34d;
+      --brand-danger: #ef4444;
+      --brand-danger-rgb: 239, 68, 68;
+      --brand-danger-subtle: #7f1d1d;
+      --brand-danger-emphasis: #fca5a5;
+      --brand-bg: #0f172a;                    /* 页面底（slate-900） */
+      --brand-surface: #1e293b;               /* 面板面（slate-800） */
+      --brand-border: #334155;
+      --brand-text: #f1f5f9;
+      --brand-text-muted: #94a3b8;
+      --bs-primary-border-subtle: #3b82f6;
+      --bs-success-border-subtle: #22c55e;
+      --bs-info-border-subtle: #06b6d4;
+      --bs-warning-border-subtle: #f59e0b;
+      --bs-danger-border-subtle: #ef4444;
+      --bs-secondary-bg: #293548;
+      --bs-tertiary-bg: #334155;   /* 深色下 hover/内嵌面需明显浅于面板底 #1e293b，否则列表 hover 与代码块背景不可见 */
+      --bs-secondary-border-subtle: #475569;
+      --bs-link-hover-color: var(--brand-primary-emphasis);
+      --bs-progress-bg: #293548;
+    }
+    /* Bootstrap 工具类/组件里硬编码的浅色，深色下翻转到面板面 */
+    .bg-white { background-color: var(--brand-surface) !important; }   /* navbar / card-header */
+    .btn-close { filter: invert(1) grayscale(100%) brightness(200%); } /* 深色下关闭按钮转白 */
+    /* highlight.js（GitHub 浅色主题）token 翻转：代码块在深底上保持可读 */
+    .hljs { background: transparent; color: #d1d5db; }
+    .hljs-doctag, .hljs-keyword, .hljs-meta .hljs-keyword, .hljs-template-tag,
+    .hljs-template-variable, .hljs-type, .hljs-variable.language_ { color: #f472b6; }
+    .hljs-title, .hljs-title.class_, .hljs-title.class_.inherited__, .hljs-title.function_ { color: #c4b5fd; }
+    .hljs-attr, .hljs-attribute, .hljs-literal, .hljs-meta, .hljs-number, .hljs-operator,
+    .hljs-selector-attr, .hljs-selector-class, .hljs-selector-id, .hljs-variable,
+    .hljs-section { color: #93c5fd; }
+    .hljs-meta .hljs-string, .hljs-regexp, .hljs-string { color: #86efac; }
+    .hljs-built_in, .hljs-symbol { color: #fdba74; }
+    .hljs-code, .hljs-comment, .hljs-formula { color: #6b7280; }
+    .hljs-name, .hljs-quote, .hljs-selector-pseudo, .hljs-selector-tag { color: #86efac; }
+    .hljs-subst, .hljs-emphasis, .hljs-strong { color: #d1d5db; }
+    .hljs-bullet { color: #fde68a; }
+    .hljs-addition { color: #86efac; background-color: rgba(34,197,94,.15); }
+    .hljs-deletion { color: #fca5a5; background-color: rgba(239,68,68,.15); }
+  }
+
   body {
-    font-size: 14px; line-height: 1.6; background: #f3f4f6;
-    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-    padding-top: 58px; /* 固定顶栏高度 */
+    font-size: 14.5px; line-height: 1.6; background: var(--brand-bg);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    padding-top: calc(58px + env(safe-area-inset-top)); /* 固定顶栏高度 + 顶部安全区（刘海屏/横屏） */
     touch-action: manipulation; /* 手机端禁用双击缩放残留，点击更跟手 */
     -webkit-tap-highlight-color: rgba(37, 99, 235, .12);
+    overscroll-behavior-y: contain; /* 文件列表顶部继续下拉不触发整页刷新（横向滚动手势不受影响） */
+  }
+  /* 顶部安全区：navbar 内容避开刘海/状态栏；py-1 工具类带 !important，须同权重覆盖 */
+  .navbar { padding-top: calc(.25rem + env(safe-area-inset-top)) !important; }
+  /* 横屏刘海机：navbar 左右也避开安全区（px-2 工具类带 !important，同权重覆盖） */
+  .navbar .container-fluid {
+    padding-left: calc(.5rem + env(safe-area-inset-left)) !important;
+    padding-right: calc(.5rem + env(safe-area-inset-right)) !important;
+  }
+  /* 页面底固定为品牌灰（覆盖 Bootstrap .bg-body-tertiary 工具类的 !important） */
+  body.bg-body-tertiary { background-color: var(--brand-bg) !important; }
+  /* 键盘焦点统一高亮（:focus-visible 仅键盘导航时出现，鼠标点击不显示） */
+  :focus-visible { outline: 2px solid var(--bs-primary); outline-offset: 2px; }
+  /* 列表行 hover 反馈（桌面光标；触屏走点按反馈，无 sticky hover） */
+  .list-group-item { transition: background-color .15s ease, color .15s ease; }
+  @media (hover: hover) {
+    .list-group-item:hover { background: var(--bs-tertiary-bg); }
   }
   html { -webkit-text-size-adjust: 100%; }
   .logo { width: 28px; height: 28px; border-radius: 8px; background: var(--bs-primary);
@@ -29,11 +174,12 @@
   #driveTabs .btn { white-space: nowrap; }
   /* 面包屑分段 */
   #breadcrumb .seg { padding: 3px 8px; border-radius: 6px; cursor: pointer; color: var(--bs-secondary-color); white-space: nowrap; }
-  #breadcrumb .seg:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+  @media (hover: hover) { #breadcrumb .seg:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); } }
   #breadcrumb .sep { color: var(--bs-border-color); margin: 0 1px; }
   #breadcrumb .cur { color: var(--bs-body-color); font-weight: 600; padding: 3px 8px; white-space: nowrap; }
-  /* 置顶卡头部：标题可截断，按钮不挤压（修复窄屏 58px 横向溢出根因） */
-  #pinnedHead { flex-shrink: 1; min-width: 0; }
+  /* 置顶卡头部：标题可截断，按钮不挤压（修复窄屏 58px 横向溢出根因）；
+     圆角让键盘焦点环（:focus-visible）更美观 */
+  #pinnedHead { flex-shrink: 1; min-width: 0; border-radius: 6px; }
   #pinnedHeadTitle { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* 文件名（flex 子项需要 min-width:0 才能正确截断） */
   .nm { min-width: 0; }
@@ -44,14 +190,16 @@
   /* 顶部轻量 toast（固定定位，避开 Bootstrap 自带 .toast 组件） */
   .app-toast { position: fixed; top: 70px; left: 50%; transform: translateX(-50%); z-index: 1080;
                background: rgba(17,24,39,.92); color: #fff; border-radius: 8px; padding: 9px 16px;
-               font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw; }
+               font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 90vw;
+               box-shadow: 0 4px 14px rgba(17,24,39,.18); }
   .app-toast.show { opacity: 1; }
   .empty { text-align: center; color: var(--bs-secondary-color); padding: 40px 0; }
   /* 置顶列表行分隔 */
   .prow + .prow { border-top: 1px dashed var(--bs-border-color); }
   /* 星标 */
-  .star { color: #d1d5db; font-size: 16px; }
+  .star { color: #d1d5db; font-size: 16px; transition: transform .15s ease, color .15s ease; }
   .star.on { color: #d97706; }
+  @media (hover: hover) { .star:hover { transform: scale(1.15); } }
   /* 详情表 */
   .detail-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   .detail-tbl td { padding: 6px 8px; border-bottom: 1px solid var(--bs-border-color); vertical-align: top; word-break: break-all; }
@@ -86,7 +234,7 @@
   .unpack-row { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--bs-border-color); }
   .unpack-row:last-child { border-bottom: none; }
   .unpack-row:not(.dir) { cursor: pointer; }
-  .unpack-row:not(.dir):hover { background: var(--bs-tertiary-bg); }
+  @media (hover: hover) { .unpack-row:not(.dir):hover { background: var(--bs-tertiary-bg); } }
   .unpack-row .uname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
   .unpack-row .usz { color: var(--bs-secondary-color); font-size: 12px; flex-shrink: 0; }
   /* 视频容器 */
@@ -111,7 +259,7 @@
   .vavatar { width: 28px; height: 28px; font-size: 13px; flex-shrink: 0; user-select: none; }
   .vname { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vtag { font-size: 12px; padding: .35em .7em; transition: background-color .15s ease, border-color .15s ease, color .15s ease; }
-  .vtag:hover { background: var(--bs-secondary-bg); border-color: var(--bs-secondary-border-subtle); }
+  @media (hover: hover) { .vtag:hover { background: var(--bs-secondary-bg); border-color: var(--bs-secondary-border-subtle); } }
   .vtech { font-size: 11px; padding: .3em .6em; color: var(--bs-secondary-color);
            max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vnotes { line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
@@ -119,15 +267,19 @@
   .vtoggle { text-decoration: none; user-select: none; }
   /* 网格视图（大图标，类似 Windows 文件管理器） */
   #fileRows.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; padding: 8px; }
-  .grid-item { display: flex; flex-direction: column; align-items: center; padding: 10px 6px 8px; cursor: pointer; text-align: center; }
-  .grid-item:hover { background: var(--bs-tertiary-bg); }
+  .grid-item { display: flex; flex-direction: column; align-items: center; padding: 10px 6px 8px; cursor: pointer; text-align: center;
+               border-radius: 10px; transition: background-color .15s ease, box-shadow .15s ease; }
+  @media (hover: hover) {
+    .grid-item:hover { background: var(--bs-tertiary-bg); box-shadow: 0 4px 14px rgba(17,24,39,.10); }
+  }
   .grid-top { width: 100%; display: flex; justify-content: flex-end; align-items: center; gap: 4px; margin-bottom: 2px; }
-  .grid-star { color: #d1d5db; font-size: 14px; cursor: pointer; user-select: none; }
+  .grid-star { color: #d1d5db; font-size: 14px; cursor: pointer; user-select: none; transition: transform .15s ease, color .15s ease; }
+  @media (hover: hover) { .grid-star:hover { transform: scale(1.15); } }
   .grid-star.on { color: #d97706; }
   .grid-info { font-size: 14px; cursor: pointer; padding: 0 2px; }
   .grid-cover-wrap { width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
   .grid-cover { max-width: 88px; max-height: 88px; object-fit: contain; }
-  .grid-name { width: 100%; font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all; margin-top: 6px; }
+  .grid-name { width: 100%; font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all; margin-top: 8px; }
   .grid-size { color: var(--bs-secondary-color); font-size: 11px; margin-top: 2px; }
   /* ===== 手机端（≤575.98px）：触控目标 ≥44px、字号提升、窄屏布局 ===== */
   @media (max-width: 575.98px) {
@@ -143,7 +295,9 @@
     .star, .info-btn, .share-btn { display: inline-flex; align-items: center; justify-content: center;
                                    min-width: 40px; min-height: 44px; }
     #breadcrumb .seg, #breadcrumb .cur { display: inline-flex; align-items: center; min-height: 40px; }
-    .type-chip, .tag-chip { min-height: 40px; }
+    .type-chip, .tag-chip { min-height: 44px; }   /* 统一触控高度（审计 P2-4：40px < 44px） */
+    /* 进度条预览浮层降高：竖屏手机上不再盖住原生控制条 */
+    .video-preview img { height: 56px; }
     /* 置顶卡头部：窄屏改为两行堆叠（标题行可截断 + 操作按钮行），杜绝 320px 挤压溢出；
        flex-shrink-0 为 Bootstrap !important 工具类，须用 !important 覆盖 */
     #pinnedCard .card-header { flex-wrap: wrap; row-gap: 2px; }
@@ -160,7 +314,7 @@
                   opacity: 0; pointer-events: none; transition: opacity .25s ease; }
   .sidebar-mask.show { opacity: 1; pointer-events: auto; }
   .sidebar { position: fixed; top: 0; right: 0; bottom: 0; z-index: 1041; width: min(320px, 86vw);
-             background: #fff; display: flex; flex-direction: column; transform: translateX(102%);
+             background: var(--brand-surface); display: flex; flex-direction: column; transform: translateX(102%);
              transition: transform .28s ease; }
   .sidebar.show { transform: translateX(0); }
   .sidebar-head { padding: 14px 16px; border-bottom: 1px solid var(--bs-border-color); }
@@ -169,14 +323,14 @@
   .sidebar-body { overscroll-behavior: contain; }
   .type-chip { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--bs-border-color);
                border-radius: 999px; padding: 4px 11px; cursor: pointer; font-size: 13px; user-select: none;
-               background: #fff; transition: all .15s ease; }
+               background: var(--brand-surface); transition: all .15s ease; }
   .type-chip input { margin: 0; cursor: pointer; }
   .type-chip.active { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; }
   /* 推荐标签 chips（点击→追加到搜索框，pulse 为点击反馈动画） */
   .tag-chip { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--bs-border-color);
               border-radius: 999px; padding: 3px 10px; cursor: pointer; font-size: 12px; user-select: none;
-              background: #fff; transition: all .15s ease; }
-  .tag-chip:hover { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; }
+              background: var(--brand-surface); transition: all .15s ease; }
+  @media (hover: hover) { .tag-chip:hover { background: var(--bs-primary); border-color: var(--bs-primary); color: #fff; } }
   .tag-chip .score { font-size: 10px; opacity: .55; }
   .tag-chip.pulse { animation: tagPulse .25s ease; }
   @keyframes tagPulse { 0% { transform: scale(1); } 50% { transform: scale(1.18); } 100% { transform: scale(1); } }
@@ -187,7 +341,7 @@
   .pack-panel { position: fixed; right: 12px; bottom: max(12px, env(safe-area-inset-bottom));
                 width: min(560px, calc(100vw - 24px));
                 max-height: min(78vh, 720px); max-height: min(78dvh, 720px);
-                display: flex; flex-direction: column; background: #fff;
+                display: flex; flex-direction: column; background: var(--brand-surface);
                 border: 1px solid var(--bs-border-color); border-radius: 12px; z-index: 1030;
                 box-shadow: 0 12px 44px rgba(17,24,39,.22); overflow: hidden; }
   .pack-panel.mini { transform: translateY(calc(100% - 46px)); transition: transform .18s ease; }
@@ -207,7 +361,7 @@
   .pk-prow:last-child { border-bottom: none; }
   .pk-dir-btn { cursor: pointer; }
   /* 排队/扫描不确定态：轨道条纹动画进度条 */
-  .progress.pk-idle-track { background: repeating-linear-gradient(45deg,#e9ecef 0 6px,#f8f9fa 6px 12px);
+  .progress.pk-idle-track { background: repeating-linear-gradient(45deg, var(--bs-secondary-bg) 0 6px, var(--bs-tertiary-bg) 6px 12px);
                              animation: pkIdle 1s linear infinite; }
   @keyframes pkIdle { to { background-position: 24px 0; } }
   /* 头部活动摘要（打包中/下载中/待下载/扫描排队），窄屏隐藏腾位置 */
@@ -230,6 +384,137 @@
     @media (max-height: 640px) { #packTasks { max-height: 28vh; } }
     /* 全屏弹窗底部预留 iOS 手势条区域 */
     .modal-content { padding-bottom: env(safe-area-inset-bottom); }
+  }
+
+  /* ==================== T7 视觉大升级：肉眼可见的现代感与品牌感 ==================== */
+  :root {
+    --brand-grad-from: #2563eb;   /* 品牌渐变起点（导航 / 主按钮 / 活动胶囊） */
+    --brand-grad-to: #1e40af;     /* 品牌渐变终点 */
+    --brand-card-shadow: 0 8px 24px rgba(15, 23, 42, .10);   /* 卡片浮起阴影 */
+    --brand-card-radius: 16px;    /* 卡片大圆角 */
+    --brand-btn-radius: 10px;     /* 按钮圆角 */
+  }
+
+  /* 1) 顶部导航：品牌渐变 + 白字；logo 白底蓝字；上传按钮白底高对比 */
+  .navbar {
+    background: linear-gradient(135deg, var(--brand-grad-from), var(--brand-grad-to)) !important;
+    border-bottom: 1px solid rgba(255, 255, 255, .18) !important;
+    box-shadow: 0 2px 12px rgba(37, 99, 235, .22) !important;
+  }
+  .navbar .navbar-brand { color: #fff !important; }
+  .navbar .navbar-brand:hover { color: #fff !important; }
+  .navbar .navbar-brand .logo {
+    background: #fff; color: var(--brand-primary);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .18);
+  }
+  .navbar #uploadBtn {
+    background: #fff; color: var(--brand-primary); border-color: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .18);
+  }
+  @media (hover: hover) {
+    .navbar #uploadBtn:hover { background: #eef4ff; color: var(--brand-primary-emphasis); border-color: #fff; transform: translateY(-1px); }
+  }
+
+  /* 2) 磁盘标签：活动态渐变胶囊 + 白字 + 阴影；非活动态描边圆润 + hover 提亮 */
+  #driveTabs .btn { border-radius: 999px !important; }
+  #driveTabs .btn-primary {
+    background: linear-gradient(135deg, var(--brand-grad-from), var(--brand-grad-to));
+    border-color: transparent;
+    box-shadow: 0 3px 10px rgba(37, 99, 235, .35);
+  }
+  #driveTabs .btn-outline-secondary {
+    border-color: var(--bs-border-color);
+    color: var(--bs-body-color);
+  }
+  @media (hover: hover) {
+    #driveTabs .btn-outline-secondary:hover {
+      background: var(--bs-primary-bg-subtle);
+      border-color: var(--bs-primary);
+      color: var(--bs-primary);
+    }
+  }
+
+  /* 3) 卡片：大圆角 + 深阴影，灰底上明显浮起 */
+  .card {
+    border-radius: var(--brand-card-radius);
+    border: 1px solid var(--bs-border-color);
+  }
+  .card.shadow-sm { box-shadow: var(--brand-card-shadow) !important; }
+  .card > .card-header { border-radius: calc(var(--brand-card-radius) - 1px) calc(var(--brand-card-radius) - 1px) 0 0; }
+  .modal-content { border-radius: 14px; }
+  .pk-task { border-radius: 12px !important; }
+
+  /* 4) 按钮：圆角 10px；primary 渐变 + 微阴影 + hover 浮起 */
+  .btn { border-radius: var(--brand-btn-radius); }
+  .btn-primary {
+    --bs-btn-hover-bg: transparent;
+    --bs-btn-active-bg: transparent;
+    background: linear-gradient(135deg, var(--brand-grad-from), var(--brand-grad-to));
+    border-color: transparent;
+    box-shadow: 0 2px 6px rgba(37, 99, 235, .25);
+  }
+  .btn-primary:hover, .btn-primary:focus {
+    background: linear-gradient(135deg, var(--brand-grad-to), var(--brand-grad-to));
+    border-color: transparent;
+  }
+  @media (hover: hover) {
+    .btn-primary:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(37, 99, 235, .35); }
+  }
+  .btn-outline-primary {
+    --bs-btn-hover-bg: var(--bs-primary-bg-subtle);
+    --bs-btn-hover-color: var(--bs-primary);
+    --bs-btn-hover-border-color: var(--bs-primary);
+  }
+
+  /* 5) 列表 / 网格：hover 品牌色条；网格卡片常态白底 + 边框 + 阴影 */
+  .list-group-item { position: relative; }
+  @media (hover: hover) {
+    .list-group-item:hover::before {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+      background: linear-gradient(180deg, var(--brand-grad-from), var(--brand-grad-to));
+      border-radius: 0 2px 2px 0;
+    }
+  }
+  .grid-item {
+    background: var(--brand-surface);
+    border: 1px solid var(--bs-border-color);
+    box-shadow: 0 1px 3px rgba(15, 23, 42, .06);
+    border-radius: 12px;
+  }
+  @media (hover: hover) {
+    .grid-item:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(15, 23, 42, .12); }
+  }
+
+  /* 6) 置顶卡头部品牌装饰：顶部渐变条 + 浅品牌色 tint */
+  #pinnedCard { position: relative; overflow: hidden; }
+  #pinnedCard::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 4px; z-index: 2;
+    background: linear-gradient(90deg, var(--brand-grad-from), var(--brand-grad-to));
+  }
+  #pinnedCard .card-header { background: rgba(37, 99, 235, .035) !important; }   /* 覆盖 bg-white 工具类 */
+
+  /* 7) 深色模式同步（变量翻转 + 导航深蓝渐变 + 各组件深色适配） */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --brand-grad-from: #3b82f6;
+      --brand-grad-to: #1d4ed8;
+      --brand-card-shadow: 0 8px 24px rgba(0, 0, 0, .45);
+    }
+    .navbar {
+      background: linear-gradient(135deg, #1e3a8a, #172554) !important;
+      box-shadow: 0 2px 12px rgba(0, 0, 0, .35) !important;
+    }
+    .navbar .navbar-brand .logo { background: var(--brand-surface); color: var(--brand-primary); box-shadow: 0 2px 8px rgba(0, 0, 0, .35); }
+    .navbar #uploadBtn { background: var(--brand-surface); color: var(--brand-primary); border-color: var(--brand-surface); }
+    @media (hover: hover) {
+      .navbar #uploadBtn:hover { background: var(--bs-secondary-bg); color: var(--brand-primary); border-color: var(--bs-secondary-bg); transform: translateY(-1px); }
+    }
+    .card { border-color: var(--brand-border); }
+    .grid-item { border-color: var(--brand-border); box-shadow: 0 1px 3px rgba(0, 0, 0, .3); }
+    @media (hover: hover) {
+      .grid-item:hover { box-shadow: 0 6px 18px rgba(0, 0, 0, .5); }
+    }
+    #pinnedCard .card-header { background: rgba(59, 130, 246, .07) !important; }
   }
 </style>
 </head>
@@ -258,7 +543,7 @@
   <!-- 置顶文件卡片（头部可点击折叠） -->
   <div id="pinnedCard" class="card shadow-sm mb-2">
     <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
-      <div class="d-flex align-items-center gap-2 flex-shrink-0" id="pinnedHead" role="button" title="展开/收起置顶文件">
+      <div class="d-flex align-items-center gap-2 flex-shrink-0" id="pinnedHead" role="button" tabindex="0" aria-expanded="true" title="展开/收起置顶文件">
         <span class="fs-6 fw-semibold" id="pinnedHeadTitle">📌 置顶文件 · 0 项 · 共 —</span>
         <span class="small text-muted" id="pinnedChevron">▼</span>
       </div>
@@ -329,7 +614,7 @@
 <div id="packMiniBar" class="d-none">📦 打包中心</div>
 
 <!-- 轻量 toast -->
-<div id="toast" class="app-toast" role="status"></div>
+<div id="toast" class="app-toast" role="status" aria-live="polite"></div>
 
 <!-- 通用弹窗（Bootstrap Modal：手机全屏，桌面居中） -->
 <div class="modal fade" id="appModal" tabindex="-1" aria-hidden="true">
