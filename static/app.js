@@ -1948,6 +1948,7 @@ function showVideo(path, name) {
   openModal(name, body, { path, name, type: "video" });
   // ---- 状态 ----
   let mse = null;          // { ms, sb, fetching, offset, buf, start, wantAppend, gen }
+
   let subVtt = null;       // { url, src }
   let asrVtt = null;
   let asrLang = "ja";
@@ -2012,13 +2013,29 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   function showErr(msg) { errTip.style.display = "block"; errTip.textContent = msg; }
 
-  function playNative() {
+  // 原生模式播放并（可选）恢复播放位置：切换 src 会让浏览器重新加载媒体（闪烁不可避免），
+  // 但保持 currentTime 可避免"跳回开头"的额外突兀感。
+  function playResume(resume) {
+    if (resume > 0) {
+      const onLoaded = () => {
+        v.removeEventListener("loadedmetadata", onLoaded);
+        try { if (Math.abs(v.currentTime - resume) > 1) v.currentTime = resume; } catch (e) { /* 忽略 */ }
+        v.play().catch(() => { /* 用户手势后静默 */ });
+      };
+      v.addEventListener("loadedmetadata", onLoaded);
+    } else {
+      v.play().catch(() => { /* 用户手势后静默 */ });
+    }
+  }
+
+  function playNative(resumePos) {
     stopTransPoll();
     subMode = "none";
     clearSubOverlay();
     if (subChk.input.checked && subVtt) { subMode = "track"; }
     if (subVtt) v.setAttribute("crossorigin", "anonymous");
     else v.removeAttribute("crossorigin");
+    const resume = (resumePos != null ? resumePos : v.currentTime) || 0;
     const q = qSel.value;
     if (q === "original") {
       // 原画：直连源流（缓存下载开关仅在此档生效）
@@ -2026,18 +2043,18 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
             (cacheChk.input.checked ? "&cache=1" : "");
       v.src = url;
       if (subMode === "track" && subVtt) attachTrack(subVtt.url);
-      v.play().catch(() => { /* 用户手势后静默 */ });
+      playResume(resume);
       return;
     }
     // 转码档：transdl 未转码完会返回 409。先查 transstatus，就绪则直接播；
     // 未就绪则打一次 transdl 触发后端开始转码（会 409 + 进度），随后每 2s 轮询（上限 120s）。
-    const poll = { gen: 1, q };
+    const poll = { gen: 1, q, resume };
     transPoll = poll;
     fetch(BASE + "api/transstatus?path=" + encodeURIComponent(path) + "&q=" + q)
       .then(r => r.json().catch(() => null))
       .then(j => {
         if (transPoll !== poll || !v.isConnected) return;
-        if (j && j.ready) startTransPlay(q);
+        if (j && j.ready) startTransPlay(q, resume);
         else {
           showTransTip(j && typeof j.progress === "number" ? j.progress : null);
           kickTranscode(poll);
@@ -2063,11 +2080,11 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       .catch(() => { if (transPoll === poll) scheduleTransPoll(poll, null); });
   }
   // 转码就绪后真正播放
-  function startTransPlay(q) {
+  function startTransPlay(q, resumePos) {
     stopTransPoll();
     v.src = BASE + "api/transdl?path=" + encodeURIComponent(path) + "&q=" + q;
     if (subMode === "track" && subVtt) attachTrack(subVtt.url);
-    v.play().catch(() => { /* 用户手势后静默 */ });
+    playResume(resumePos || 0);
   }
   // 每 2s 轮询一次转码状态，直到 ready 或超时（120s）；关闭/切画质后自动停止
   function scheduleTransPoll(poll, progress) {
@@ -2221,32 +2238,23 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     mimeCache[key] = fallback;
     return fallback;
   }
-  async function startMse() {
+  async function startMse(startPos) {
     stopTransPoll();
     if (mse) { stopStream(); }
     if (!window.MediaSource || !window.MediaSource.isTypeSupported) {
       showErr("该浏览器不支持 MediaSource，无法启用免证书模式");
       return;
     }
-    const q = qSel.value;                 // await 期间画质可能变化，用当时的 q
+    const start = startPos || 0;              // 从原生切 MSE 时保持播放位置
+    const q = qSel.value;                     // await 期间画质可能变化，用当时的 q
     const mime = await getMime(q);
     if (qSel.value !== q || !mseChk.input.checked || !v.isConnected) return;  // 状态已变则放弃
     if (!MediaSource.isTypeSupported(mime)) {
-      // 原画档 MIME 不被支持（典型：HEVC/hvc1、或音频非 aac 导致奇异 MIME）时，
-      // 自动降级到高清重播；仅 original→high 一级，high 仍不支持才报错。
-      if (q === "original" && !mseFallbackDone) {
-        mseFallbackDone = true;
-        toast("原画需转码播放，已切换高清");
-        qSel.value = "high";
-        startMse().catch(e => showErr("MSE 启动失败: " + (e && e.message)));
-        return;
-      }
       showErr("浏览器不支持该格式的 fMP4 MSE 播放（" + mime + "）");
       return;
     }
-    mseFallbackDone = false;
     const ms = new MediaSource();
-    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start: 0, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: null };
+    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: start || null, q };
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
     lastMsUrl = URL.createObjectURL(ms);
     v.src = lastMsUrl;
@@ -2259,6 +2267,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         const sb = ms.addSourceBuffer(mime);
         mse.sb = sb;
         sb.mode = "segments";
+        // 从原生切 MSE 且带起播位置：数据时间戳从 start 偏移（后端 -ss start 输出时间戳 0 起）
+        try { sb.timestampOffset = mse.start; } catch (e) { /* 忽略 */ }
         sb.addEventListener("updateend", () => {
           if (!mse || mse.gen !== myGen) return;
           // 上一轮 fetch 返回时 sb 正在 updating 暂存的数据：先补 append，避免丢帧
@@ -2320,18 +2330,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const mime = await getMime(q);
     if (!mse || qSel.value !== q || mySeq !== mseBuildSeq || !v.isConnected) return;  // 状态已变则放弃
     if (!MediaSource.isTypeSupported(mime)) {
-      // 与 startMse 一致：原画档不支持时降级高清重播（仅一级，避免递归）
-      if (q === "original" && !mseFallbackDone) {
-        mseFallbackDone = true;
-        toast("原画需转码播放，已切换高清");
-        qSel.value = "high";
-        buildMse(v.currentTime || 0).catch(() => { /* 异步内部已兜底 */ });
-        return;
-      }
       showErr("浏览器不支持该格式的 fMP4 MSE 播放（" + mime + "）");
       return;
     }
-    mseFallbackDone = false;
     mse.gen++;
     mse.fetching = false;   // 修复：重建时重置拉取标志——旧 pump 的 fetch 响应会被 gen 检查丢弃（其 fetching 重置语句执行不到），
                             // 不重置则新流的 pump 永远被 fetching=true 挡住（seek/切画质后视频停住）
@@ -2342,6 +2343,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     mse.offset = 0;
     mse.buf = new Uint8Array(0);
     mse.wantAppend = false;
+    mse.q = q;                 // 记录当前画质（切画质时判断能否复用 SourceBuffer 避免闪烁）
     mse.pendingSeek = t;   // 重建后等新流首段就绪再拨 currentTime（避免归 0 卡在缓冲外）
     const ms = new MediaSource();
     mse.ms = ms;
@@ -2386,6 +2388,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   function pump() {
     if (!mse || !mse.sb) return;
+    // 弹窗关闭（hidden.bs.modal → stopMedia 清 src）后 MediaSource 已被 detach、readyState 变为非 open：
+    // 立即静默停止拉流（不 toast/不降级/不无限重试）；飞行中的 fetch 响应也会被 catch 容错丢弃
+    try { if (mse.ms.readyState !== "open" || !v.isConnected) { mse.fetching = false; return; } } catch (e) { mse.fetching = false; return; }
     if (mse.fetching) { mse.wantAppend = true; return; }   // 修复：当前有 fetch 在飞时标记待续拉，旧响应释放 fetching 后补拉
     if (mse.sb.updating) { mse.wantAppend = true; return; }
     mse.fetching = true;
@@ -2427,6 +2432,16 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
             }
           } catch (e) {
             if (e.name === "QuotaExceededError") { trimAndAppend(arr); return; }
+            // 弹窗关闭（hidden.bs.modal → stopMedia 清 src）后 MediaSource 已被 detach、
+            // readyState 变为非 open：飞行中的 pump 撞上 appendBuffer 抛 InvalidStateError，
+            // 这是正常清理动作，静默停止即可（绝不能进降级/重试/报错）。
+            try {
+              if (!mse || mse.ms.readyState !== "open" || !v.isConnected ||
+                  (v.currentSrc && !v.currentSrc.startsWith("blob:"))) {
+                if (mse) mse.fetching = false;
+                return;
+              }
+            } catch (e2) { /* 忽略 */ }
             // append 失败（典型：HTMLMediaElement.error 已置位，通常是后端流时序/会话竞态导致的瞬时问题）：
             // 原画档先降级高清；高清/后续仍失败则重建 MediaSource 重试当前画质（限 3 次），而非直接放弃黑屏。
             if (q === "original" && !mseFallbackDone && mse.gen === myGen) {
@@ -2476,18 +2491,40 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   }
 
   // ---- 画质 / 免证书 / 缓存下载切换 ----
-  qSel.onchange = () => { if (mse) { buildMse(v.currentTime || 0).catch(() => {}); } else playNative(); };
+  // 切画质：MSE 模式下转码档之间（high/medium/low）mime 恒为 avc1.640033，可复用同一个
+  // SourceBuffer 平滑切换（像 seek 一样清缓冲+改 timestampOffset+拉新流），不重建 MediaSource
+  // → video 不重新加载 → 不闪烁；涉及 original（mime 可能不同）或原生模式才重建/换 src。
+  qSel.onchange = () => {
+    if (mse) {
+      const t = v.currentTime || 0;
+      const newQ = qSel.value;
+      const oldQ = mse.q || "original";
+      mse.q = newQ;
+      if (oldQ !== "original" && newQ !== "original") {
+        seekMse(t);
+      } else {
+        buildMse(t).catch(() => { /* 异步内部已兜底 */ });
+      }
+    } else {
+      playNative(v.currentTime);
+    }
+  };
   mseChk.input.onchange = () => {
     if (mseChk.input.checked) {
       // MSE（免证书）模式与缓存下载互斥：缓存只对原画原生流生效
       if (cacheChk.input.checked) { cacheChk.input.checked = false; cacheChk.el.classList.add("text-muted"); }
-      startMse().catch(e => showErr("MSE 启动失败: " + (e && e.message)));
-    } else { stopStream(); playNative(); }
+      const resume = v.currentTime || 0;   // 原生→MSE 保持播放位置
+      startMse(resume).catch(e => showErr("MSE 启动失败: " + (e && e.message)));
+    } else {
+      const resume = v.currentTime || 0;   // MSE→原生 保持播放位置（先记录再 stopStream）
+      stopStream();
+      playNative(resume);
+    }
   };
   cacheChk.input.onchange = () => {
     if (mse) { cacheChk.input.checked = false; toast("缓存下载仅在免证书关闭的原画播放时生效"); return; }
     if (qSel.value !== "original") { cacheChk.input.checked = false; toast("缓存下载仅对原画档生效"); return; }
-    playNative();
+    playNative(v.currentTime);
   };
   subChk.input.onchange = () => {
     if (subChk.input.checked) {
@@ -2513,7 +2550,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       const t = v.currentTime || 0;
       let bufStart = 0, bufEnd = 0;
       try { if (v.buffered.length) { bufStart = v.buffered.start(0); bufEnd = v.buffered.end(v.buffered.length - 1); } } catch (e) { /* 忽略 */ }
-      if (t < bufStart - 1 || t > bufEnd + 1) seekMse(t);
+      // 缓冲为空（起播/刚 remove 清空）时 currentTime 必然落在范围外，但此时没有可 seek 的数据，直接跳过；
+      // 否则起播时 seeking（currentTime 归 0）会误触发 seekMse(0) → 反复清空缓冲 → 永远起播不了
+      if (v.buffered.length && (t < bufStart - 1 || t > bufEnd + 1)) seekMse(t);
     };
     clearTimeout(mseSeekDebounce);
     mseSeekDebounce = setTimeout(trySeek, 250);
