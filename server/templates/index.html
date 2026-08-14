@@ -338,6 +338,106 @@
   .vnotes { line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
   .vnotes-fold { max-height: 4.8em; overflow: hidden; }
   .vtoggle { text-decoration: none; user-select: none; }
+  /* ===== 播放页信息面板美化（视频网站风：作者行/资料行/统计行） ===== */
+  .video-meta { max-width: 720px; }                    /* d) 面板放宽上限，避免信息压缩 */
+  .vmeta-authors { row-gap: 6px; }
+  .vtitle { font-size: 1.4rem; font-weight: 700; letter-spacing: .01em;
+            color: var(--bs-emphasis-color); line-height: 1.25; }
+  .vstudio-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 600; line-height: 1;
+    color: var(--bs-body-color);
+    background: color-mix(in srgb, var(--bs-primary) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--bs-primary) 45%, transparent);
+    border-radius: 6px; padding: .32em .65em; flex-shrink: 0;
+  }
+  .vstudio-badge::before { content: "🎬"; font-size: 11px; }
+  .vtype-badge { font-size: 11.5px; font-weight: 600; padding: .3em .6em; flex-shrink: 0; }
+  .vdata-row { display: flex; flex-direction: column; gap: 7px; }
+  .vdata-row .d-flex { flex-wrap: wrap; align-items: center; column-gap: 6px; row-gap: 6px; }
+  .vdata-chip {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 12.5px; font-weight: 600; line-height: 1;
+    color: var(--bs-body-color);
+    background: var(--bs-tertiary-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 999px; padding: .4em .75em;
+    font-variant-numeric: tabular-nums;               /* 数字（★9.4/1920x1080）等宽对齐，不突兀 */
+    vertical-align: middle; align-self: center;        /* ②与同行徽章垂直居中 */
+  }
+  .vdata-chip.vrate .vrate-star { display: inline-block; line-height: 1; vertical-align: -1px; }
+  .vdata-chip.vrate { color: #b8860b; border-color: color-mix(in srgb, #ffc107 55%, transparent);
+                      background: color-mix(in srgb, #ffc107 14%, transparent); }
+  .vdata-chip.vdata-sub { font-weight: 500; color: var(--bs-secondary-color); font-size: 12px; }
+  .vdata-sec { margin-top: 8px; opacity: .95; padding-top: 7px; border-top: 1px dashed var(--bs-border-color); }
+  .vstat {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12.5px; line-height: 1; color: var(--bs-secondary-color);
+    background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color);
+    border-radius: 8px; padding: .44em .75em; white-space: nowrap;
+  }
+  .vstat-ic { font-size: 12px; flex-shrink: 0; width: 14px; text-align: center; }  /* ②统一图标列宽 */
+  .vstat-label { color: var(--bs-secondary-color); opacity: .85; flex-shrink: 0; }
+  .vstat-val { color: var(--bs-body-color); font-weight: 600;
+               min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+               font-variant-numeric: tabular-nums; }
+  .detail-sec-row td.k { font-size: 11px; letter-spacing: .05em; opacity: .6; padding-top: 10px; }
+  /* ===== t8 布局优化附加规则 ===== */
+  /* P2 窄屏统计行：胶囊可换行，值过长省略号（原 white-space:nowrap 在窄容器内会裁切） */
+  .vstats { flex-wrap: wrap; column-gap: 8px; row-gap: 8px; }
+  .vstat { max-width: 100%; white-space: nowrap; }
+  .vstudio-hint {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600; line-height: 1; color: var(--bs-secondary-color);
+    background: var(--bs-tertiary-bg); border: 1px dashed var(--bs-border-color);
+    border-radius: 5px; padding: .3em .55em; flex-shrink: 0;
+  }
+  /* P5 标签行：前缀 chip 与后面胶囊统一为 pill 视觉；固定统一 gap 消除间距不均 */
+  .vtag-row { row-gap: 7px; column-gap: 7px; align-items: center; }
+  .vtag { margin: 0; }
+  .vtag-prefix {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11.5px; font-weight: 600; line-height: 1; color: var(--bs-secondary-color);
+    background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color);
+    border-radius: 999px; padding: .38em .75em; flex-shrink: 0;
+  }
+  /* P3 技术信息折叠区：默认收起；与上方标签行用分割/留白分隔（b） */
+  .vtech-details { user-select: none; margin-top: 14px; }
+  .vtech-details::before { content: ""; display: block; height: 1px; background: var(--bs-border-color);
+                           opacity: .5; margin-bottom: 10px; }   /* 分割线，避免与标签行粘连 */
+  .vtech-details[open] .vtech-summary { opacity: .8; }
+  .vtech-summary {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 11px; font-weight: 600; color: var(--bs-secondary-color); cursor: pointer;
+    background: var(--bs-tertiary-bg); border: 1px solid var(--bs-border-color);
+    border-radius: 6px; padding: .34em .7em; list-style: none; width: fit-content;
+  }
+  .vtech-summary::-webkit-details-marker, .vtech-summary::marker { display: none; content: ""; }
+  .vtech-summary::after { content: " ▾"; opacity: .7; }
+  .vtech-details[open] .vtech-summary::after { content: " ▴"; }
+  /* ②手机端行距/对齐打磨 */
+  @media (max-width: 575.98px) {
+    .video-meta { line-height: 1.5; }
+    .vmeta-authors, .vdata-row, .vstats, .vtag-row { row-gap: 8px; }
+  }
+  /* P1 详情/预览弹窗高度管理：正文区 max-height + 内部滚动，避免底部内容被截断 */
+  #appModal .modal-dialog { max-height: calc(100vh - 30px); }
+  #appModal .modal-content { max-height: inherit; display: flex; flex-direction: column; }
+  #appModal .modal-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .detail-tbl { width: 100%; table-layout: auto; }
+  .detail-tbl td.k { white-space: nowrap; padding-right: 1.4em; vertical-align: top; }
+  .detail-tbl td.v { word-break: break-word; overflow-wrap: anywhere; padding-right: 12px; }
+  /* 备注原文折叠：长 comment 按语义换行而非硬截（根因2/3） */
+  .detail-note-raw { font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+                     color: var(--bs-secondary-color); background: var(--bs-tertiary-bg);
+                     border: 1px solid var(--bs-border-color); border-radius: 6px;
+                     padding: 8px 10px; margin-top: 4px; }
+  /* 底部按钮缓冲：避免弹窗底部按钮被遮挡（根因3） */
+  #appModal .modal-body { padding-bottom: 18px; }
+  @media (max-width: 575.98px) {
+    #appModal .modal-body { padding-bottom: 26px; }
+    .detail-tbl td.k { padding-right: 1em; }
+  }
   /* 网格视图（大图标，类似 Windows 文件管理器） */
   #fileRows.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; padding: 8px; }
   .grid-item { display: flex; flex-direction: column; align-items: center; padding: 10px 6px 8px; cursor: pointer; text-align: center;

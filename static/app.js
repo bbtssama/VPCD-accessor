@@ -1491,38 +1491,124 @@ async function showDetail(path, name) {
     secTitle.textContent = "详细信息";
     secTitle.className = "detail-sec";
     body.appendChild(secTitle);
+    // ---- 结构化解析字段（来源 api/stat 的 details.meta；识别到才展示，原则同 renderMeta）----
+    const mo = d.meta || {};
+    const metaRows = [];
+    const addMeta = (label, v) => {
+      if (v === undefined || v === null || v === "") return;
+      metaRows.push([label, v]);
+    };
+    addMeta("评分", mo.rating);
+    addMeta("话数", mo.episodes);
+    addMeta("放送", mo.broadcast);
+    addMeta("制 作", mo.studio);
+    addMeta("观 看", mo.views);
+    addMeta("点赞率", mo.likes);
+    addMeta("收 藏", mo.favorites);
+    addMeta("上 传", mo.upload);
+    if (mo.cast) addMeta("声优", mo.cast);
+    if (mo.director) addMeta("监督", mo.director);
+    if (mo.original) addMeta("原作", mo.original);
+    if (mo.region) addMeta("地区", mo.region);
+    if (mo.year) addMeta("年份", mo.year);
+    if (mo.quality) addMeta("画质", mo.quality);
+    if (mo.subtitle) addMeta("字幕", mo.subtitle);
+    if (Array.isArray(mo.tags) && mo.tags.length) addMeta("标签", mo.tags.join("、"));
+    if (Array.isArray(mo.notes) && mo.notes.length) addMeta("备注", mo.notes.join("\n"));
+    if (Array.isArray(mo.extra) && mo.extra.length) addMeta("其他", mo.extra.map(e => e.k + " " + e.v).join("\n"));
     const pairs = [
       ["标题", d.title],
       ["作者", d.artist],
       ["专辑", d.album],
       ["类型", d.genre],
       ["日期", d.date],
-      ["备注/评论", d.comment],
       ["时长", d.duration_text],
       ["分辨率", d.resolution],
-      ["视频编码", d.video_codec],
-      ["音频编码", d.audio_codec],
-      ["采样率", d.sample_rate],
-      ["声道", d.channels],
-      ["容器码率", d.container_bitrate],
-      ["创建时间", d.created_time],
+    ];
+    // 去重：原始表已出现的标签（标题/作者/专辑/类型/日期）不再在解析段重复（P4c）
+    const rawLabels = new Set();
+    pairs.forEach(p => { if (p[1] !== undefined && p[1] !== null && p[1] !== "") rawLabels.add(p[0]); });
+    // 共通去重：解析「制片/制作」与原始「作者」同名 → 二选一，只保留作者（避免 MADHOUSE 两处）
+    const dedupedMeta = metaRows.filter(([label]) => {
+      if (label === "标题") return !rawLabels.has("标题");
+      if (label === "作者") return !rawLabels.has("作者");
+      if (label === "类型") return !rawLabels.has("类型");
+      if (label === "制 作" && d.artist && mo.studio && String(d.artist).trim() === String(mo.studio).trim()) return false;
+      return true;
+    });
+
+    // 技术参数（编码器/码率/采样率等）不走平铺表，折叠为「⚙ 技术信息」（根因1/P3）
+    const techRows = [
+      ["视频编码", d.video_codec], ["音频编码", d.audio_codec], ["采样率", d.sample_rate],
+      ["声道", d.channels], ["容器码率", d.container_bitrate], ["创建时间", d.created_time],
       ["生成工具", d.encoder],
     ];
-    const t2 = document.createElement("table");
-    t2.className = "detail-tbl";
-    pairs.forEach(p => {
-      if (p[1] === undefined || p[1] === null || p[1] === "") return;
-      let val = String(p[1]);
+
+    const _addRow = (tbl, label, valRaw, longAllowed) => {
+      if (valRaw === undefined || valRaw === null || valRaw === "") return;
+      let val = String(valRaw);
       let tip = "";
-      if (p[0] === "备注/评论" && val.length > 200) {  // comment 可能很长：截断显示 + title 悬停完整内容
-        val = val.slice(0, 200) + "…";
-        tip = " title='" + esc(String(p[1])) + "'";
+      if (longAllowed && val.length > 120) {   // 长文本省略 + title 悬停完整
+        val = val.slice(0, 120) + "…";
+        tip = " title='" + esc(String(valRaw)) + "'";
       }
       const tr = document.createElement("tr");
-      tr.innerHTML = "<td class='k'>" + esc(p[0]) + "</td><td class='v'" + tip + ">" + esc(val) + "</td>";
-      t2.appendChild(tr);
-    });
+      tr.innerHTML = "<td class='k'>" + esc(label) + "</td><td class='v'" + tip + ">" + esc(val) + "</td>";
+      tbl.appendChild(tr);
+    };
+
+    const t2 = document.createElement("table");
+    t2.className = "detail-tbl";
+    pairs.forEach(p => _addRow(t2, p[0], p[1], p[0] === "备注/评论" || p[0] === "备注"));
+    // 解析字段：分隔标题 + 逐项行（已去重）
+    if (dedupedMeta.length) {
+      const sep = document.createElement("tr");
+      sep.className = "detail-sec-row";
+      sep.innerHTML = "<td class='k' colspan='2'>── 解析字段 ──</td>";
+      t2.appendChild(sep);
+      dedupedMeta.forEach(([label, val]) => _addRow(t2, label, val, label === "备注" || label === "其他"));
+    }
     if (t2.children.length) body.appendChild(t2);
+
+    // 原始 comment 备注：解析字段已逐项展示时，原始串折叠为「备注原文」（根因2，避免两边同时平铺重复）
+    if (d.comment !== undefined && d.comment !== null && d.comment !== "") {
+      const rawComment = String(d.comment);
+      if (dedupedMeta.length) {
+        const det = document.createElement("details");
+        det.className = "vtech-details detail-note-collapse mt-2";
+        const sum = document.createElement("summary");
+        sum.className = "vtech-summary";
+        sum.textContent = "📄 备注原文";
+        sum.title = "comment 原始串（解析字段已逐项展示在上方）；展开可查看原文";
+        det.appendChild(sum);
+        const pre = document.createElement("div");
+        pre.className = "detail-note-raw";
+        pre.textContent = rawComment;
+        det.appendChild(pre);
+        body.appendChild(det);
+      } else {
+        const tbl = document.createElement("table");
+        tbl.className = "detail-tbl mt-2";
+        _addRow(tbl, "备注/评论", rawComment, true);
+        if (tbl.children.length) body.appendChild(tbl);
+      }
+    }
+
+    // 技术信息折叠块（根因1/P3）：与面板一致用 <details>
+    if (techRows.some(r => r[1] !== undefined && r[1] !== null && r[1] !== "")) {
+      const det = document.createElement("details");
+      det.className = "vtech-details mt-2";
+      const sum = document.createElement("summary");
+      sum.className = "vtech-summary";
+      sum.textContent = "⚙ 技术信息";
+      sum.title = "编码器 / 码率 / 采样率 / 声道等文件固有参数，点击展开";
+      det.appendChild(sum);
+      const tbl = document.createElement("table");
+      tbl.className = "detail-tbl mt-1";
+      techRows.forEach(r => _addRow(tbl, r[0], r[1], false));
+      det.appendChild(tbl);
+      body.appendChild(det);
+    }
   }
   const btns = document.createElement("div");
   btns.className = "d-flex flex-wrap gap-2 mt-3";
@@ -1620,7 +1706,7 @@ function showVideo(path, name) {
     metaBox.innerHTML = "";
     const title = (m && m.title) || name.replace(/\.[^.]+$/, "");
     const h = document.createElement("h5");
-    h.className = "fw-bold mb-1 vtitle";
+    h.className = "fw-bold mb-2 vtitle";
     h.textContent = title;
     if (title.length > 40) h.title = title;
     metaBox.appendChild(h);
@@ -1631,46 +1717,136 @@ function showVideo(path, name) {
       metaBox.appendChild(p);
       return;
     }
-    // 作者 + 类型 + 统计行（有才渲染）
-    const row = document.createElement("div");
-    row.className = "d-flex align-items-center flex-wrap gap-2";
-    if (m.author) {
+    // ---- 作者行：头像 + 名字 + 类型徽章 + 制作公司徽章（去重：studio 与 author 相同不重复展示） ----
+    const auth = document.createElement("div");
+    auth.className = "d-flex flex-wrap align-items-center gap-2 vmeta-authors";
+    const _display = m.author || m.studio || "";
+    if (m.studio && m.studio !== _display) {   // 制作公司名牌（仅当与展示名不同才单独列出，避免 MADHOUSE 两处）
+      const st = document.createElement("span");
+      st.className = "vstudio-badge";
+      st.textContent = m.studio;
+      st.title = "制作公司：" + m.studio;
+      auth.appendChild(st);
+    }
+    if (_display) {
       const av = document.createElement("span");
       av.className = "vavatar d-inline-flex align-items-center justify-content-center rounded-circle bg-primary text-white";
-      av.textContent = m.author.charAt(0) || "U";
-      row.appendChild(av);
+      av.textContent = _display.charAt(0) || "U";
+      av.title = "作者头像：" + _display;
+      auth.appendChild(av);
       const nm = document.createElement("span");
       nm.className = "fw-semibold small vname";
-      nm.textContent = m.author;
-      nm.title = m.author;
-      row.appendChild(nm);
+      nm.textContent = _display;
+      nm.title = _display + (m.studio && m.studio === _display ? "（制作公司）" : "");
+      auth.appendChild(nm);
     }
     if (m.type) {
       const b = document.createElement("span");
-      b.className = "badge ms-1 " + (m.type === "裏番" ? "text-bg-warning" : "text-bg-secondary");
+      b.className = "badge ms-1 vtype-badge " + (m.type === "裏番" ? "text-bg-warning" : "text-bg-secondary");
       b.textContent = m.type;
-      row.appendChild(b);
+      b.title = "类型：" + m.type;
+      auth.appendChild(b);
     }
+    if (auth.children.length) metaBox.appendChild(auth);
+
+    // ---- 资料行（data：评分/话数/放送 为核心——制作公司已并入作者行避免重复；扩展字段为次要） ----
+    const dataCore = [];
+    if (m.rating) {   // 评分徽章：★9.4（站内评分，与「点赞率」在统计行区分）
+      const b = document.createElement("span");
+      b.className = "vdata-chip vrate";
+      const st = document.createElement("span");
+      st.className = "vrate-star";
+      st.textContent = "★";
+      b.appendChild(st);
+      b.appendChild(document.createTextNode(m.rating));
+      b.title = "评分 " + m.rating;
+      dataCore.push(b);
+    }
+    if (m.episodes) {
+      const b = document.createElement("span");
+      b.className = "vdata-chip";
+      b.textContent = "全" + m.episodes + "话";
+      b.title = "话数 " + m.episodes;
+      dataCore.push(b);
+    }
+    if (m.broadcast) {
+      const b = document.createElement("span");
+      b.className = "vdata-chip";
+      b.textContent = m.broadcast;
+      b.title = "放送 " + m.broadcast;
+      dataCore.push(b);
+    }
+    const dataSec = [];
+    {   // 次要资料字段（聚合进第二行；识别到才显示）
+      const secMap = [
+        ["cast", "CV"], ["director", "监督"], ["original", "原作"],
+        ["region", "地区"], ["year", "年份"], ["quality", "画质"], ["subtitle", "字幕"],
+      ];
+      secMap.forEach(([k, lbl]) => {
+        if (m[k]) {
+          const b = document.createElement("span");
+          b.className = "vdata-chip vdata-sub";
+          b.textContent = lbl + " " + m[k];
+          b.title = lbl + " " + m[k];
+          dataSec.push(b);
+        }
+      });
+    }
+    if (dataCore.length || dataSec.length) {
+      const drow = document.createElement("div");
+      drow.className = "vdata-row mt-2";
+      const coreWrap = document.createElement("div");
+      coreWrap.className = "d-flex flex-wrap align-items-center gap-1";
+      dataCore.forEach(c => coreWrap.appendChild(c));
+      if (dataCore.length) drow.appendChild(coreWrap);
+      if (dataSec.length) {
+        const secWrap = document.createElement("div");
+        secWrap.className = "d-flex flex-wrap align-items-center gap-1 vdata-sec";
+        dataSec.forEach(c => secWrap.appendChild(c));
+        drow.appendChild(secWrap);
+      }
+      metaBox.appendChild(drow);
+    }
+
+    // ---- 统计行（stats：观看/点赞率/收藏/上传；时长/分辨率。防窄屏裁切见 CSS .vstat） ----
     const stats = [];
-    if (m.views) stats.push("👁 " + m.views);
-    if (m.likes) stats.push("👍 " + m.likes);
-    if (m.upload) stats.push("📅 " + m.upload);
-    if (m.duration) stats.push("⏱ " + m.duration);
-    if (m.resolution) stats.push("🖥 " + m.resolution);
+    if (m.views) stats.push(["👁", "观看", m.views, "观看 " + m.views]);
+    if (m.likes) stats.push(["👍", "点赞率", m.likes, "点赞率（好评率）" + m.likes]);
+    if (m.favorites) stats.push(["⭐", "收藏", m.favorites, "收藏 " + m.favorites]);
+    if (m.upload) stats.push(["📅", "上传", m.upload, "上传 " + m.upload]);
+    if (m.duration) stats.push(["⏱", "时长", m.duration, "时长 " + m.duration]);
+    if (m.resolution && !m.quality) stats.push(["🖥", "分辨率", m.resolution, "分辨率 " + m.resolution]);   // 已用「画质」表同一信息则不重复
     if (stats.length) {
-      const sp = document.createElement("span");
-      sp.className = "text-muted small ms-auto";
-      sp.textContent = stats.join(" · ");
-      row.appendChild(sp);
+      const srow = document.createElement("div");
+      srow.className = "d-flex flex-wrap align-items-center gap-2 mt-2 vstats";
+      stats.forEach(s => {
+        const it = document.createElement("span");
+        it.className = "vstat";
+        it.title = s[3];
+        const ic = document.createElement("span");
+        ic.className = "vstat-ic";
+        ic.textContent = s[0];
+        const lb = document.createElement("span");
+        lb.className = "vstat-label";
+        lb.textContent = s[1];
+        const vl = document.createElement("span");
+        vl.className = "vstat-val";
+        vl.textContent = s[2];
+        it.appendChild(ic);
+        it.appendChild(lb);
+        it.appendChild(vl);
+        srow.appendChild(it);
+      });
+      metaBox.appendChild(srow);
     }
-    if (row.children.length) metaBox.appendChild(row);
-    // 标签行（B 站风格胶囊徽章）
+    // 标签行（B 站风格胶囊徽章；前缀用 🏷 chip 与前排 pill 样式统一）
     if (m.tags && m.tags.length) {
       const tr = document.createElement("div");
-      tr.className = "d-flex flex-wrap align-items-center gap-1 mt-2";
+      tr.className = "d-flex flex-wrap align-items-center gap-1 mt-2 vtag-row";
       const lbl = document.createElement("span");
-      lbl.className = "text-muted small";
-      lbl.textContent = "标签：";
+      lbl.className = "vtag-prefix";
+      lbl.textContent = "🏷 标签";
+      lbl.title = "标签";
       tr.appendChild(lbl);
       m.tags.forEach(t => {
         const b = document.createElement("span");
@@ -1680,7 +1856,7 @@ function showVideo(path, name) {
       });
       metaBox.appendChild(tr);
     }
-    // 备注/简介卡片（notes 为主，extra 用户级未知键并入一行；超 3 行折叠）
+    // 备注/简介卡片（notes 为主，extra 用户级未知键并入一行；超 3 行折叠，保持）
     const lines = [];
     (m.notes || []).forEach(n => lines.push(n));
     (m.extra || []).forEach(e => lines.push(e.k + " " + e.v));
@@ -1711,10 +1887,17 @@ function showVideo(path, name) {
       }
       metaBox.appendChild(card);
     }
-    // 技术信息小徽章行（编码器/码率/声道等文件固有信息，低调展示；可整体省略）
+    // 技术信息（编码器/码率/声道等文件固有信息）：折叠为「技术信息」区，默认收起，降权展示（P3）
     if (m.tech && m.tech.length) {
+      const det = document.createElement("details");
+      det.className = "vtech-details mt-2";
+      const sum = document.createElement("summary");
+      sum.className = "vtech-summary";
+      sum.textContent = "⚙ 技术信息";
+      sum.title = "编码器 / 码率 / 采样率 / 声道等文件固有参数，点击展开";
+      det.appendChild(sum);
       const tr = document.createElement("div");
-      tr.className = "d-flex flex-wrap align-items-center gap-1 mt-2";
+      tr.className = "d-flex flex-wrap align-items-center gap-1 mt-1";
       m.tech.forEach(t => {
         const b = document.createElement("span");
         b.className = "badge text-bg-light border vtech";
@@ -1722,7 +1905,8 @@ function showVideo(path, name) {
         b.title = t.k + " " + t.v;
         tr.appendChild(b);
       });
-      metaBox.appendChild(tr);
+      det.appendChild(tr);
+      metaBox.appendChild(det);
     }
   }
   fetch(BASE + "api/vmeta?path=" + encodeURIComponent(path))
@@ -1773,6 +1957,8 @@ function showVideo(path, name) {
 let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；预览图按此比例而非固定 90px）
   let lastFrameT = -1;     // 单帧预览防抖时间戳（80ms 内复用当前帧）
   let mimeCache = {};      // key=path|q → MSE mime（动态 codec，修复高清/标清/低清播不了）
+  let mseDuration = 0;     // 源时长（vinfo 提供）；用于设置 MediaSource.duration，否则 seek 到缓冲外会被钳制到缓冲末尾
+  let mseSeekGuard = 0;    // 重建时间戳：buildMse 重建期间/刚重建后忽略 seeking 事件，防止浏览器自动跳转触发二次重建循环
   let transPoll = null;    // { gen, timer, q } 原生转码档 409 轮询状态
   let mseBuildSeq = 0;     // buildMse 请求序号：并发时只保留最后一次
   let pendingAsrLoad = false;
@@ -2025,6 +2211,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         const j = await r.json();
         if (j && typeof j.mseMime === "string" && j.mseMime) {
           mimeCache[key] = j.mseMime;
+          const d = parseFloat(j.duration);
+          if (Number.isFinite(d) && d > 0) mseDuration = d;
           return j.mseMime;
         }
       }
@@ -2064,17 +2252,28 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const myGen = mse.gen;
     ms.addEventListener("sourceopen", () => {
       if (!mse || mse.gen !== myGen) return;
+      // 设置 MediaSource duration（源时长）：允许 seek 到未缓冲位置，否则浏览器会把 currentTime 钳制到缓冲末尾
+      try { if (mseDuration > 0) ms.duration = mseDuration; } catch (e) { /* 忽略 */ }
       try {
         const sb = ms.addSourceBuffer(mime);
         mse.sb = sb;
         sb.mode = "segments";
         sb.addEventListener("updateend", () => {
-          if (mse && mse.gen === myGen && mse.wantAppend) {
+          if (!mse || mse.gen !== myGen) return;
+          // 上一轮 fetch 返回时 sb 正在 updating 暂存的数据：先补 append，避免丢帧
+          if (mse.buf && mse.buf.length) {
+            const arr = mse.buf;
+            mse.buf = new Uint8Array(0);
+            try { mse.sb.appendBuffer(arr); return; } catch (e) { /* 忽略 */ }
+          }
+          if (mse.wantAppend) {
             mse.wantAppend = false;
             pump();
           }
         });
         pump();
+        // 勾选 MSE 后自动开始播放（startMse 原无 v.play，用户需再点一次播放才会动）
+        try { v.play().catch(() => { /* autoplay 策略拒绝时静默，用户可手动点播放 */ }); } catch (e) { /* 忽略 */ }
       } catch (e) {
         showErr("MSE 初始化失败: " + e.message);
       }
@@ -2102,6 +2301,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   async function buildMse(t) {
     if (!mse) return;
+    mseSeekGuard = Date.now();   // 重建期间忽略 seeking（新流时间戳偏移后浏览器自动跳转，防止触发二次重建）
     const mySeq = ++mseBuildSeq;          // 连续 seek/切画质只保留最后一次
     const q = qSel.value;
     const mime = await getMime(q);
@@ -2120,6 +2320,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     }
     mseFallbackDone = false;
     mse.gen++;
+    mse.fetching = false;   // 修复：重建时重置拉取标志——旧 pump 的 fetch 响应会被 gen 检查丢弃（其 fetching 重置语句执行不到），
+                            // 不重置则新流的 pump 永远被 fetching=true 挡住（seek/切画质后视频停住）
     try { mse.ms.removeAttribute("src"); } catch (e) { /* 忽略 */ }
     destroySb();
     try { mse.ms.endOfStream(); } catch (e) { /* 忽略 */ }
@@ -2135,14 +2337,25 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const myGen = mse.gen;
     ms.addEventListener("sourceopen", () => {
       if (!mse || mse.gen !== myGen) return;
+      // 设置 MediaSource duration（源时长）：允许 seek 到未缓冲位置，否则浏览器会把 currentTime 钳制到缓冲末尾
+      try { if (mseDuration > 0) ms.duration = mseDuration; } catch (e) { /* 忽略 */ }
       try {
         const sb = ms.addSourceBuffer(mime);
         mse.sb = sb;
         sb.mode = "segments";
         sb.addEventListener("updateend", () => {
-          if (mse && mse.gen === myGen && mse.wantAppend) { mse.wantAppend = false; pump(); }
+          if (!mse || mse.gen !== myGen) return;
+          // 上一轮 fetch 返回时 sb 正在 updating 暂存的数据：先补 append，避免丢帧
+          if (mse.buf && mse.buf.length) {
+            const arr = mse.buf;
+            mse.buf = new Uint8Array(0);
+            try { mse.sb.appendBuffer(arr); return; } catch (e) { /* 忽略 */ }
+          }
+          if (mse.wantAppend) { mse.wantAppend = false; pump(); }
         });
         pump();
+        // 切画质/seek 重建后自动恢复播放（buildMse 原无 v.play，重建后视频会停在暂停态）
+        try { v.play().catch(() => { /* autoplay 策略拒绝时静默 */ }); } catch (e) { /* 忽略 */ }
       } catch (e) { /* 忽略 */ }
     });
     if (subChk.input.checked && subVtt) { subMode = "overlay"; setupSubOverlay(); }
@@ -2178,6 +2391,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
           try {
             mse.sb.appendBuffer(arr);
             if (done) { try { mse.ms.endOfStream(); } catch (e) { /* 忽略 */ } }
+            else { mse.wantAppend = true; }  // 修复：append 完成后续拉下一段（updateend 触发 pump）
           } catch (e) {
             if (e.name === "QuotaExceededError") { trimAndAppend(arr); return; }
             // 原画档 append 失败：多为 vinfo 探测失败的兜底 MIME（avc1.640033）与实际流
@@ -2203,9 +2417,13 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   function trimAndAppend(arr) {
     if (!mse || !mse.sb) return;
     try {
-      const toRemove = mse.sb.buffered.length ? mse.sb.buffered.start(0) : 0;
       if (mse.sb.buffered.length && mse.sb.buffered.start(0) > 0) {
         mse.sb.remove(0, Math.max(0, v.currentTime - 30));
+        // remove 异步执行：暂存数据等 updateend 补 append（避免立即 append 抛 InvalidStateError 丢数据），
+        // 并标记续拉，保证补 append 后继续拉下一段
+        mse.buf = arr;
+        mse.wantAppend = true;
+        return;
       }
     } catch (e) { /* 忽略 */ }
     try { mse.sb.appendBuffer(arr); } catch (e2) { /* 忽略 */ }
@@ -2231,11 +2449,18 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       else loadSubtitle();
     } else { clearSubOverlay(); removeTrack(); subMode = "none"; }
   };
-  // MSE 模式：拖动进度条到某点 → 从该点重新拉取（seek 重建连续流）
-  v.addEventListener("seeked", () => {
+  // MSE 模式：拖动进度条到缓冲外某点 → 从该点重建连续流（seekMse）。
+  // 用 seeking 而非 seeked：目标超出已缓冲范围时浏览器永远不完成 seek（seeked 不触发），
+  // 必须立即重建；缓冲内 seek 浏览器直接处理，无需重建。
+  // mseSeekGuard：buildMse 重建（seek/切画质）后新流时间戳偏移、浏览器自动跳转期间会触发
+  // seeking（t 与缓冲起点一致/或归 0），guard 窗口内忽略，避免二次重建循环。
+  v.addEventListener("seeking", () => {
     if (mse && mse.sb) {
+      if (Date.now() - mseSeekGuard < 1500) return;
       const t = v.currentTime || 0;
-      if (Math.abs(t - mse.start) > 2) seekMse(t);
+      let bufStart = 0, bufEnd = 0;
+      try { if (v.buffered.length) { bufStart = v.buffered.start(0); bufEnd = v.buffered.end(v.buffered.length - 1); } } catch (e) { /* 忽略 */ }
+      if (t < bufStart - 1 || t > bufEnd + 1) seekMse(t);
     }
   });
 
@@ -2988,7 +3213,9 @@ function normSearch(s) {
 // 元数据内容搜索白名单：只匹配"具体内容"字段，排除 kind/mime/duration/resolution/upload/views/likes/tech
 // 等技术标识或数值统计字段（这些字段名/值很容易在每个文件里重复出现，匹配没有意义）。
 const META_CONTENT_KEYS = ["title","author","type","tags","notes","extra",
-                           "track","album","artist","genre","comment","description","captions","lyrics"];
+                           "track","album","artist","genre","comment","description","captions","lyrics",
+                           // spec v1 §7.1：评论文本型新字段（可全文搜索；纯数值/日期如 rating/year/episodes/broadcast 不入，防噪）
+                           "favorites","studio","cast","director","original","region"];
 function collectMetaValue(v, out) {
   if (typeof v === "string") out.push(v);
   else if (typeof v === "number" || typeof v === "boolean") out.push(String(v));

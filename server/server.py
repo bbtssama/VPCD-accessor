@@ -1863,34 +1863,71 @@ def _parse_comment_meta(comment):
 
     规则：
       * 先按换行与 | 拆段（个别 | 在值里时，靠"段内含冒号且键是短词"的启发式容忍）；
-      * 段匹配 ^([^:：]{1,12})[:：](.+)$ 视为 键:值，键去空白；
-      * 键归一化（全角/半角、中英混合，见 key_map）；未识别的键进 extra；
-      * 匹配不到冒号的段：非空则整行进 notes。
+      * 段匹配 ^([^:：]{1,24})[:：](.+)$ 视为 键:值，键去空白；
+      * 键归一化（全角/半角、中英混合、大小写，见 key_map）；未识别的键进 extra；
+      * 匹配不到冒号的段：非空则整行进 notes；
+      * rating 取 x.x、episodes 取首位整数，其余标量字段原样保留（_norm_field）。
 
-    返回 dict：{upload,views,likes,author,type,title:str|None,
-                tags:[str], notes:[str], extra:[{k,v}]}
+    返回 dict：{upload,views,likes,favorites,broadcast,episodes,rating,studio,
+                cast,director,original,region,subtitle,quality,year,
+                author,type,title:str|None, tags:[str], notes:[str], extra:[{k,v}]}
     """
     key_map = {
         "上传": "upload", "发布时间": "upload", "发布于": "upload", "时间": "upload",
         "观看": "views", "播放": "views", "播放量": "views", "观看次数": "views",
         "点赞": "likes", "赞": "likes", "好评": "likes", "喜欢": "likes",
+        "收藏": "favorites", "收藏量": "favorites",
+        "放送": "broadcast", "首播": "broadcast", "开播": "broadcast",
+        "话数": "episodes", "集数": "episodes", "第N话": "episodes",
+        "评分": "rating", "得分": "rating", "星级": "rating",
+        "制作": "studio", "制作公司": "studio", "制作组": "studio", "制作会社": "studio",
+        "声优": "cast", "配音": "cast", "声優": "cast", "キャスト": "cast",
+        "监督": "director", "导演": "director", "監督": "director",
+        "原作": "original", "原著": "original",
+        "地区": "region", "国家": "region",
+        "字幕": "subtitle",
+        "画质": "quality", "清晰度": "quality", "画質": "quality",
+        "年份": "year", "年代": "year",
         "标签": "tags", "关键字": "tags", "关键词": "tags", "tags": "tags", "key": "tags",
+        # 英文 Genre(s)：分类列表按标签拆分（英语站 MAL/AniDB 常见）
+        "genre": "tags", "genres": "tags", "genres_list": "tags",
         "作者": "author", "出品": "author", "出品方": "author",
         "UP主": "author", "Up主": "author", "アーティスト": "author",
         "类型": "type", "分类": "type", "类别": "type", "ジャンル": "type",
         "备注": "notes", "评论": "notes", "简介": "notes", "描述": "notes",
-        "介绍": "notes", "說明": "notes", "说明": "notes",
+        "介绍": "notes", "說明": "notes", "说明": "notes", "剧情": "notes", "剧情简介": "notes",
         "标题": "title", "影片名": "title",
+        # 英文别名（spec v1 §3.X 宽字段注册表；key.lower() 兼容大小写）
+        "upload": "upload", "published": "upload", "publish": "upload",
+        "views": "views", "plays": "views", "play": "views",
+        "likes": "likes", "thumbsup": "likes", "like": "likes",
+        "favorites": "favorites", "fav": "favorites",
+        "broadcast": "broadcast", "airdate": "broadcast", "release": "broadcast",
+        "episodes": "episodes", "ep": "episodes",
+        "rating": "rating", "score": "rating",
+        "studio": "studio", "company": "studio", "production": "studio",
+        "cast": "cast", "voice": "cast", "cv": "cast",
+        "director": "director",
+        "original": "original", "source": "original",
+        "region": "region", "country": "region",
+        "subtitle": "subtitle", "subs": "subtitle",
+        "quality": "quality",
+        "year": "year",
+        "synopsis": "notes", "plot": "notes", "story": "notes",
     }
-    res = {"upload": None, "views": None, "likes": None, "author": None,
-           "type": None, "title": None, "tags": [], "notes": [], "extra": []}
+    res = {"upload": None, "views": None, "likes": None, "favorites": None,
+           "broadcast": None, "episodes": None, "rating": None, "studio": None,
+           "cast": None, "director": None, "original": None, "region": None,
+           "subtitle": None, "quality": None, "year": None,
+           "author": None, "type": None, "title": None,
+           "tags": [], "notes": [], "extra": []}
     if not comment:
         return res
     for seg in re.split(r"\s*[\n|]\s*", str(comment)):
         seg = seg.strip()
         if not seg:
             continue
-        m = re.match(r"^([^:：]{1,12})[:：](.+)$", seg)
+        m = re.match(r"^([^:：]{1,24})[:：](.+)$", seg)
         if not m:
             res["notes"].append(seg)  # 无法识别为 键:值 的整行 → 备注
             continue
@@ -1899,8 +1936,8 @@ def _parse_comment_meta(comment):
         if not val:
             continue
         norm = key_map.get(key.lower()) or key_map.get(key)
-        if norm == "tags":  # 标签拆分：、，,;；/・空白，过滤空串与过长（防整句话当标签）
-            for t in re.split(r"[、，,;；/・\s]", val):
+        if norm == "tags":  # 标签拆分：、，,;；/・空格/竖线；过滤空串与过长（防整句话当标签）
+            for t in re.split(r"[、，,;；/・\s|]", val):
                 t = t.strip()
                 if t and len(t) <= 30 and t not in res["tags"]:
                     res["tags"].append(t)
@@ -1910,10 +1947,26 @@ def _parse_comment_meta(comment):
             if res["title"] is None:
                 res["title"] = val
         elif norm and res[norm] is None:
-            res[norm] = val
+            res[norm] = _norm_field(norm, val)
         else:
             res["extra"].append({"k": key, "v": val})
     return res
+
+
+def _norm_field(norm, val):
+    """数值/日期型字段的轻量归一化（spec v1 §4/§5）：
+    rating 取 x.x（或整数）、episodes 取首位整数、broadcast/year 保留年月/年份，
+    其余字段原样保留（含单位字符串如 11.8萬次）。"""
+    val = str(val).strip()
+    if not val:
+        return val
+    if norm == "rating":
+        m = re.search(r"(\d+(?:\.\d+)?)", val)
+        return m.group(1) if m else val
+    if norm == "episodes":
+        m = re.search(r"(\d+)", val)
+        return m.group(1) if m else val
+    return val
 
 
 _TECH_LABELS = {
@@ -1937,7 +1990,11 @@ def _video_meta(out, path):
     """
     cm = _parse_comment_meta(out.get("comment")) if out.get("comment") else None
     meta = {"title": None, "author": None, "type": None, "upload": None,
-            "views": None, "likes": None, "tags": [], "notes": [], "extra": [],
+            "views": None, "likes": None, "favorites": None,
+            "broadcast": None, "episodes": None, "rating": None, "studio": None,
+            "cast": None, "director": None, "original": None, "region": None,
+            "subtitle": None, "quality": None, "year": None,
+            "tags": [], "notes": [], "extra": [],
             "tech": [], "duration": None, "resolution": None}
     if out.get("title"):
         meta["title"] = str(out["title"])
@@ -1958,6 +2015,10 @@ def _video_meta(out, path):
         meta["upload"] = cm["upload"]
         meta["views"] = cm["views"]
         meta["likes"] = cm["likes"]
+        # spec v1 新增字段（番剧资料 + 多站点扩展）
+        for _k in ("favorites", "broadcast", "episodes", "rating", "studio",
+                   "cast", "director", "original", "region", "subtitle", "quality", "year"):
+            meta[_k] = cm.get(_k)
         meta["tags"] = cm["tags"]
         meta["notes"] = cm["notes"]
         meta["extra"] = cm["extra"]
@@ -2164,6 +2225,12 @@ def _video_meta_cached(path):
         v = m.get(k)
         if v:
             out[k] = list(v)
+    # spec v1 §3.X / §7.1：列表/搜索可用的文本型新增字段（仅供前端白名单全文搜索；
+    # rating/year/episodes/broadcast 等纯数值/日期不进列表 meta，避免搜索&推荐噪点）
+    for k in ("studio", "cast", "director", "original", "region", "subtitle", "quality", "favorites"):
+        v = m.get(k)
+        if v:
+            out[k] = v
     return out or None
 
 
@@ -2762,6 +2829,7 @@ def _trans_args(src_path, q, start_sec, resolution):
             "-crf", "27", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
+            "-output_ts_offset", "%s" % start_sec,
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", "-"]
     if resolution:
@@ -2771,9 +2839,14 @@ def _trans_args(src_path, q, start_sec, resolution):
 
 
 def _trans_remux_args(src_path, start_sec):
-    """原画免证书：-c copy 快速转封装为 fMP4（不重编码），供 MSE 原画档。"""
+    """原画免证书：-c copy 快速转封装为 fMP4（不重编码），供 MSE 原画档。
+
+    -output_ts_offset start_sec：把输出时间戳整体偏移到 start 秒（配合 -ss 输入 seek），
+    使 MSE append 后浏览器 currentTime 直接落在源时间轴的正确位置（拖动后进度条从
+    拖动点继续，而不是从 0 重新显示）。start=0 时偏移 0，无影响。"""
     return [FFMPEG, "-y", "-ss", "%s" % start_sec, "-i", src_path,
             "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+            "-output_ts_offset", "%s" % start_sec,
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", "-"]
 
