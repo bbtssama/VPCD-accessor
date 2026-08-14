@@ -2829,7 +2829,6 @@ def _trans_args(src_path, q, start_sec, resolution):
             "-crf", "27", "-g", "60", "-keyint_min", "60", "-sc_threshold", "0",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "128k",
-            "-output_ts_offset", "%s" % start_sec,
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", "-"]
     if resolution:
@@ -2839,14 +2838,9 @@ def _trans_args(src_path, q, start_sec, resolution):
 
 
 def _trans_remux_args(src_path, start_sec):
-    """原画免证书：-c copy 快速转封装为 fMP4（不重编码），供 MSE 原画档。
-
-    -output_ts_offset start_sec：把输出时间戳整体偏移到 start 秒（配合 -ss 输入 seek），
-    使 MSE append 后浏览器 currentTime 直接落在源时间轴的正确位置（拖动后进度条从
-    拖动点继续，而不是从 0 重新显示）。start=0 时偏移 0，无影响。"""
+    """原画免证书：-c copy 快速转封装为 fMP4（不重编码），供 MSE 原画档。"""
     return [FFMPEG, "-y", "-ss", "%s" % start_sec, "-i", src_path,
             "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
-            "-output_ts_offset", "%s" % start_sec,
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
             "-f", "mp4", "-"]
 

@@ -2245,7 +2245,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     }
     mseFallbackDone = false;
     const ms = new MediaSource();
-    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start: 0, wantAppend: false, gen: (mse ? mse.gen : 0) + 1 };
+    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start: 0, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0 };
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
     lastMsUrl = URL.createObjectURL(ms);
     v.src = lastMsUrl;
@@ -2284,19 +2284,30 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   function seekMse(t) {
     if (!mse) return;
+    mseSeekGuard = Date.now();   // 跳转期间忽略 seeking（新流时间戳偏移后浏览器自动跳转，防二次重建）
+    mse.fetchSeq++;              // 使飞行中的旧拉取响应失效（其数据是旧时间轴，append 进来会污染新缓冲）
+    mse.fetching = false;
     mse.start = t;
     mse.offset = 0;
     mse.buf = new Uint8Array(0);
     mse.wantAppend = false;
     if (mse.sb) {
       try { mse.sb.abort(); } catch (e) { /* 忽略 */ }
-      try {
-        v.currentTime = 0;
-        try { mse.ms.endOfStream(); } catch (e2) { /* 忽略 */ }
-        mse.ms.removeSourceBuffer(mse.sb);
-      } catch (e) { /* 忽略 */ }
+      // 时间戳偏移到 t：必须在 remove() 之前设置——remove 会使 sb 进入 updating 状态，
+      // 此时给 timestampOffset 赋值会抛 InvalidStateError（被 catch 吞掉导致偏移静默失效）
+      try { mse.sb.timestampOffset = t; } catch (e) { /* 忽略 */ }
+      let removed = false;
+      try { mse.sb.remove(0, mse.ms.duration || Infinity); removed = true; } catch (e) { /* 忽略 */ }
+      if (removed) {
+        mse.wantAppend = true;   // remove 完成后 updateend → pump 从新 start 拉流
+      } else {
+        pump();                  // remove 失败（无可清缓冲）：直接拉新流
+      }
+      // 直接把 currentTime 设为 t：guard 窗口内 seeking 被忽略；数据 append 后浏览器自动完成跳转
+      try { v.currentTime = t; } catch (e) { /* 忽略 */ }
+    } else {
+      pump();
     }
-    buildMse(t).catch(() => { /* 异步内部已兜底 */ });
   }
 
   async function buildMse(t) {
@@ -2343,6 +2354,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         const sb = ms.addSourceBuffer(mime);
         mse.sb = sb;
         sb.mode = "segments";
+        // 切画质/seek 重建：后端 -ss start 输出的流时间戳从 0 起，timestampOffset 平移到 start，
+        // 保证重建后 currentTime/进度条落在源时间轴的正确位置
+        try { sb.timestampOffset = mse.start; } catch (e) { /* 忽略 */ }
         sb.addEventListener("updateend", () => {
           if (!mse || mse.gen !== myGen) return;
           // 上一轮 fetch 返回时 sb 正在 updating 暂存的数据：先补 append，避免丢帧
@@ -2372,6 +2386,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     if (mse.sb.updating) { mse.wantAppend = true; return; }
     mse.fetching = true;
     const myGen = mse.gen;
+    const myFetch = ++mse.fetchSeq;   // 拉取代际：seek 时递增使旧响应失效
     const q = qSel.value;
     const url = BASE + "api/trans?path=" + encodeURIComponent(path) +
                 "&q=" + q + "&offset=" + mse.offset + "&need=524288&start=" + mse.start;
@@ -2380,12 +2395,12 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         const done = res.headers.get("X-Trans-Finished") === "1";
         const newOff = parseInt(res.headers.get("X-Trans-Offset") || "0", 10);
         const blob = await res.blob();
-        if (!mse || mse.gen !== myGen) return;    // 旧代响应当丢弃（seek/切画质/关闭后）
+        if (!mse || mse.gen !== myGen || mse.fetchSeq !== myFetch) return;    // 旧代/旧 seek 的响应丢弃
         mse.fetching = false;
         if (!mse || !mse.sb) return;
         if (blob.size > 0) {
           const arr = new Uint8Array(await blob.arrayBuffer());
-          if (!mse || mse.gen !== myGen) return;
+          if (!mse || mse.gen !== myGen || mse.fetchSeq !== myFetch) return;
           mse.offset = newOff;
           if (mse.sb.updating) { mse.buf = arr; mse.wantAppend = true; return; }
           try {
