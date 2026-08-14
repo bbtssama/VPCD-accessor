@@ -910,8 +910,9 @@ function dlUrl(p) { return BASE + "dl?path=" + encodeURIComponent(p); }
 
 // 按扩展名分类文件类型（与后端 preview 保持一致）
 const VIDEO_EXT = ["mp4","webm","ogv","ogg","m4v","mov","mkv","avi","ts","flv"];
+const IMAGE_EXT = ["jpg","jpeg","png","gif","webp","bmp","svg","ico","tif","tiff","avif","heic"];
 const MD_EXT = ["md","markdown"];
-const TEXT_EXT = ["txt","log","json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","conf","cfg","csv","sql","svg","env","gitignore"];
+const TEXT_EXT = ["txt","log","json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","conf","cfg","csv","sql","env","gitignore"];  // svg 已移出：归图片预览
 const ARCHIVE_EXT = ["zip"];
 function extOf(name) {
   const i = String(name).lastIndexOf(".");
@@ -920,6 +921,7 @@ function extOf(name) {
 function fileKind(name) {
   const e = extOf(name);
   if (VIDEO_EXT.indexOf(e) >= 0) return "video";
+  if (IMAGE_EXT.indexOf(e) >= 0) return "image";   // 图片优先（svg 原在 TEXT_EXT，现归图片预览）
   if (MD_EXT.indexOf(e) >= 0) return "markdown";
   if (e === "csv") return "csv";
   if (e === "pdf") return "pdf";
@@ -1065,6 +1067,86 @@ function openPreviewModal(title, state, loadingText, loader) {
   })();
   return { body, ac };
 }
+// ==================== T11 全屏预览层（方案A：弹窗内 ⛶ 放大；为方案B /view 独立页铺路） ====================
+// 全屏层与 modal 完全解耦：固定定位 + 深色底 + 控制条；内容节点移入移出不重建（视频进度/文本滚动保留）。
+let fsOpen = false;     // 全屏层是否打开
+let fsPushed = false;   // 是否已 push 浏览器历史（手机返回键/浏览器后退退出全屏）
+
+// 打开全屏：把核心内容节点移入全屏层，push 一条历史（返回键优先关全屏再关弹窗）
+function openFullscreen({ title, node, downloadUrl }) {
+  if (fsOpen || !node) return;
+  fsOpen = true;
+  node._fsHome = node.parentNode;        // 记录原父容器，退出时移回
+  $("fsTitle").textContent = title;
+  const dlSlot = $("fsBarDl");
+  dlSlot.innerHTML = "";
+  if (downloadUrl) {
+    const d = document.createElement("a");
+    d.className = "btn btn-sm btn-outline-light fs-dl";
+    d.href = downloadUrl;
+    d.textContent = "⬇ 下载";
+    dlSlot.appendChild(d);
+  }
+  $("fsBody").appendChild(node);         // 移动 DOM：视频播放/文本滚动不中断
+  // 视频保险：移动后恢复进度与播放状态（个别浏览器移动节点会闪断）
+  const v = node.querySelector ? node.querySelector("video") : null;
+  if (v) {
+    const wasPlaying = !v.paused;
+    const t = v.currentTime;
+    requestAnimationFrame(() => {
+      v.currentTime = t;
+      if (wasPlaying && v.paused) v.play().catch(() => { /* 自动播放被拒时忽略 */ });
+    });
+  }
+  fsLayer.classList.add("show");
+  if (!fsPushed) { try { history.pushState({ fs: 1 }, ""); fsPushed = true; } catch (e) { /* 忽略 */ } }
+}
+
+// 关闭全屏：内容移回原弹窗；fromPop=true 表示返回键已 back 完成（不再重复 back）
+function closeFullscreen(fromPop) {
+  if (!fsOpen) return;
+  fsOpen = false;
+  fsLayer.classList.remove("show");
+  const node = $("fsBody").firstElementChild;
+  if (node) {
+    if (node._fsHome && document.body.contains(node._fsHome)) node._fsHome.appendChild(node);
+    else node.remove();
+  }
+  $("fsBody").innerHTML = "";
+  $("fsBarDl").innerHTML = "";
+  if (fsPushed) {
+    fsPushed = false;
+    if (!fromPop) { try { history.back(); } catch (e) { /* 忽略 */ } }
+  }
+}
+
+// 预览弹窗内容顶部加"⛶ 放大"按钮（getNode 惰性取核心节点，适配异步渲染的弹窗）
+function addFsButton(body, title, getNode, downloadUrl) {
+  const row = document.createElement("div");
+  row.className = "d-flex justify-content-end mb-2";
+  const b = document.createElement("button");
+  b.type = "button";
+  b.className = "btn btn-sm btn-outline-secondary";
+  b.textContent = "⛶ 放大";
+  b.title = "全屏放大预览（Esc 退出）";
+  b.onclick = () => {
+    const node = getNode();
+    if (node) openFullscreen({ title, node, downloadUrl });
+  };
+  row.appendChild(b);
+  body.insertBefore(row, body.firstChild);
+  return row;
+}
+
+// Esc 退出全屏（优先级高于弹窗/多选/侧边栏）；手机返回键经 popstate 退出
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && fsOpen) closeFullscreen(false);
+});
+window.addEventListener("popstate", () => {
+  if (fsOpen) closeFullscreen(true);   // 返回键已完成 back，只关层不重复 back
+});
+$("fsClose").onclick = () => closeFullscreen(false);
+
 // 文本分片渲染：把大文本按 chunkLen 逐块 append 到目标元素，块间 setTimeout(0) 让出主线程，
 // 期间显示"渲染中…(x%)"；stopFlag() 返回 true（用户取消/弹窗关闭）时立即停止并移除提示。
 function fillTextChunked(target, text, chunkLen, stopFlag) {
@@ -1166,6 +1248,7 @@ async function showDetail(path, name) {
   // 预览按钮与文件列表分流保持一致（pdf/csv/lnk 也支持在线预览）
   const fk = fileKind(j.name);
   if (fk === "video") btns.appendChild(mkBtn("▶ 在线预览", () => showVideo(j.path, j.name)));
+  else if (fk === "image") btns.appendChild(mkBtn("🖼 图片预览", () => showImage(j.path, j.name)));
   else if (fk === "markdown" || fk === "text") btns.appendChild(mkBtn("📄 在线查看", () => showText(j.path, j.name)));
   else if (fk === "archive") btns.appendChild(mkBtn("📦 解压预览", () => showUnpack(j.path, j.name)));
   else if (fk === "pdf") btns.appendChild(mkBtn("📄 PDF 预览", () => showPdf(j.path, j.name)));
@@ -1178,6 +1261,7 @@ async function showDetail(path, name) {
   btns.appendChild(shareBtn);
   if (!j.locked && !j.is_dir) btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(j.path); }));
   if (btns.children.length) body.appendChild(btns);
+  addFsButton(body, name, () => body.querySelector(".detail-tbl"), dlUrl(path));   // ⛶ 全屏放大详情
   });
 }
 
@@ -1216,6 +1300,7 @@ function showVideo(path, name) {
   // ---- 视频容器（无 .video-play 覆盖按钮，播放/暂停交给原生 controls） ----
   const wrap = document.createElement("div");
   wrap.className = "video-wrap";
+  addFsButton(body, name, () => wrap, dlUrl(path));   // ⛶ 全屏放大（视频进度保留）
   const v = document.createElement("video");
   v.controls = true;
   v.playsinline = true;
@@ -2141,6 +2226,7 @@ async function showText(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  addFsButton(body, name, () => body.querySelector(".text-pre, .md-code") && body.querySelector(".text-pre, .md-code").parentElement, dlUrl(path));   // ⛶ 全屏放大文本
   });
 }
 
@@ -2191,6 +2277,7 @@ async function showUnpack(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载压缩包本身", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  addFsButton(body, name, () => body.querySelector(".unpack-list"), dlUrl(path));   // ⛶ 全屏放大解压列表
   });
 }
 
@@ -2326,8 +2413,7 @@ function renderPinned() {
     row.querySelector('[data-a="unpin"]').onclick = async () => {
       await api("api/pin?add=0&path=" + encodeURIComponent(p.path));
       pinned = pinned.filter(x => x.path !== p.path);
-      renderPinned();
-      loadList(cur);
+      renderPinned();   // 列表行无星标，无需 loadList(cur) 整目录重载（t9 修闪烁/回顶）
     };
     box.appendChild(row);
   });
@@ -2883,6 +2969,7 @@ function sortEntries(list) {
 //   阶段一（同步立即）：精确子串过滤（filterEntries）→ 排序 → 全量渲染，用户输入后马上看到结果；
 //   阶段二（异步渐进）：未命中文件进入模糊队列，分片做概率匹配，命中后按同一排序插入正确位置。
 function renderEntries() {
+  if (bulkMode) exitBulkMode();   // 搜索/筛选重建列表时退出多选
   const rows = $("fileRows");
   rows.classList.toggle("grid", view === "grid");
   const groups = parseQuery(normSearch(searchQuery)); // 查询语法统一解析一次，精确/模糊两阶段共用
@@ -3016,7 +3103,10 @@ function toggleSidebar() { sidebarOpen ? closeSidebar() : openSidebar(); }
 $("viewBtn").onclick = toggleSidebar;
 $("sidebarClose").onclick = closeSidebar;
 $("sidebarMask").onclick = closeSidebar;
-document.addEventListener("keydown", e => { if (e.key === "Escape" && sidebarOpen) closeSidebar(); });
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && bulkMode) exitBulkMode();
+  else if (e.key === "Escape" && sidebarOpen) closeSidebar();
+});
 // 移动端键盘避让：iOS 弹出键盘时 visualViewport 高度缩小，抬升侧边栏底部按钮（重置筛选）免被遮挡
 if (window.visualViewport) {
   const vv = window.visualViewport;
@@ -3099,9 +3189,13 @@ updateSortLabel();
 
 async function loadList(path, opts) {
   hideAlert();
+  if (bulkMode) exitBulkMode();   // 列表即将重建，退出多选
   const rows = $("fileRows");
   rows.classList.toggle("grid", view === "grid");
-  rows.innerHTML = '<div class="empty">加载中…</div>';
+  // 加载骨架屏（纯视觉：6 条 shimmer 行，请求完成由 renderEntries 替换）
+  rows.innerHTML = '<div class="skeleton-list">' +
+    '<div class="skeleton-row"><span class="sk-ic"></span><span class="sk-line w40"></span><span class="sk-line w12" style="margin-left:auto"></span></div>'.repeat(6) +
+    '</div>';
   // meta=1：附带每个 entry 的 meta.kind，供侧边栏类型筛选/排序/搜索使用
   const data = await api("api/list?path=" + encodeURIComponent(path) + "&meta=1");
   if (data.error) {
@@ -3148,9 +3242,12 @@ function listItem(e) {
   const row = document.createElement("li");
   const locked = !!e.locked;
   row.className = "list-group-item d-flex align-items-center gap-2 py-2" + (locked ? " text-muted opacity-75" : "");
-  const pinnedNow = isPinned(e.path);
   const ic = e.is_dir ? BASE + "static/icons/folder.svg" : (locked ? BASE + "static/icons/locked.svg" : iconUrl(e.name));
+  row.dataset.path = e.path;              // 多选批量操作取路径
+  row.dataset.dir = e.is_dir ? "1" : "";  // 批量下载跳过目录
+  // 常驻五角星已移除（t9）：置顶改由「长按多选 → 批量置顶」完成
   row.innerHTML =
+    '<span class="bulk-cb"><input type="checkbox" class="form-check-input" aria-label="选择"></span>' +
     '<span class="ic flex-shrink-0 text-center" style="width:26px"><img src="' + ic + '" width="20" height="20" alt="" style="vertical-align:-4px"></span>' +
     '<span class="nm text-truncate flex-grow-1' + (e.is_dir ? " fw-medium" : "") + '"></span>' +
     '<span class="mt d-none d-md-block text-muted small flex-shrink-0 text-end" style="width:130px">' + fmtTime(e.mtime) + "</span>" +
@@ -3158,7 +3255,7 @@ function listItem(e) {
     '<span class="info-btn text-muted flex-shrink-0 px-1 user-select-none" title="详情">ⓘ</span>' +
     (SHARE_MODE
       ? '<span class="share-btn btn-link text-primary flex-shrink-0 px-1 user-select-none" title="二次分享" style="font-size:12px">🔗 分享</span>'
-      : '<span class="star flex-shrink-0 px-1 user-select-none text-center' + (pinnedNow ? " on" : "") + '" style="width:24px">' + (pinnedNow ? "★" : "☆") + "</span>");
+      : "");
   const nm = row.querySelector(".nm");
   nm.textContent = e.name;
   bindRowAction(nm, e, locked);
@@ -3167,14 +3264,11 @@ function listItem(e) {
     const sb = row.querySelector(".share-btn");
     if (sb) sb.onclick = () => showShareDialog(e.path, e.name, { sub: true });
   } else {
-    row.querySelector(".star").onclick = async () => {
-      if (locked) { toast("被系统占用的文件无法置顶"); return; }
-      const add = pinnedNow ? 0 : 1;
-      await api("api/pin?add=" + add + "&path=" + encodeURIComponent(e.path));
-      pinned = (await api("api/info")).pinned || [];
-      renderPinned();
-      loadList(cur);
-    };
+    // 长按进入多选；多选模式行级拦截（capture 阶段先于 nm 的打开逻辑）
+    bindLongPress(row, e, locked);
+    row.addEventListener("click", (ev) => {
+      if (bulkMode) { ev.preventDefault(); ev.stopPropagation(); toggleBulkSelect(row, e.path); }
+    }, true);
   }
   return row;
 }
@@ -3196,10 +3290,12 @@ function gridItem(e) {
   } else {
     cover = '<img loading="lazy" src="' + iconUrl(e.name) + '" class="grid-cover" alt="">';
   }
-  const pinnedNow = isPinned(e.path);
+  card.dataset.path = e.path;              // 多选批量操作取路径
+  card.dataset.dir = e.is_dir ? "1" : "";  // 批量下载跳过目录
+  // 常驻 grid-star 已移除（t9）：置顶改由「长按多选 → 批量置顶」完成
   card.innerHTML =
     '<div class="grid-top">' +
-    '  <span class="grid-star' + (pinnedNow ? " on" : "") + '" title="' + (pinnedNow ? "置顶" : "置顶") + '">' + (pinnedNow ? "★" : "☆") + "</span>" +
+    '  <span class="bulk-cb"><input type="checkbox" class="form-check-input" aria-label="选择"></span>' +
     '  <span class="grid-info btn-link text-muted" title="详情">ⓘ</span>' +
     "</div>" +
     '<div class="grid-cover-wrap">' + cover + "</div>" +
@@ -3211,27 +3307,31 @@ function gridItem(e) {
   // 详情按钮：stopPropagation 避免触发卡片本身的点击行为
   const infoBtn = card.querySelector(".grid-info");
   infoBtn.onclick = (ev) => { ev.stopPropagation(); showDetail(e.path, e.name); };
-  // 置顶星标（主模式）：点击切换置顶；分享模式不显示
-  if (!SHARE_MODE) {
-    const star = card.querySelector(".grid-star");
-    star.onclick = async (ev) => {
-      ev.stopPropagation();
-      if (locked) { toast("被系统占用的文件无法置顶"); return; }
-      const add = isPinned(e.path) ? 0 : 1;
-      await api("api/pin?add=" + add + "&path=" + encodeURIComponent(e.path));
-      pinned = (await api("api/info")).pinned || [];
-      renderPinned();
-      loadList(cur);
-    };
-  } else {
-    const s = card.querySelector(".grid-star");
-    if (s) s.style.display = "none";
-  }
   if (SHARE_MODE) {
     const sb = card.querySelector(".grid-share");
     if (sb) sb.onclick = (ev) => { ev.stopPropagation(); showShareDialog(e.path, e.name, { sub: true }); };
+  } else {
+    // 长按进入多选；多选模式行级拦截（capture 阶段先于卡片打开逻辑）
+    bindLongPress(card, e, locked);
+    card.addEventListener("click", (ev) => {
+      if (bulkMode) { ev.preventDefault(); ev.stopPropagation(); toggleBulkSelect(card, e.path); }
+    }, true);
   }
   return card;
+}
+
+// 预览分发入口（T11 架构预留：方案B 独立页面 /view?path= 复用同一渲染逻辑，只需加页面壳）。
+// bindRowAction 已内联相同分发；此处独立成函数便于后续独立路由直接调用。
+function previewFile(path, name) {
+  const kind = fileKind(name);
+  if (kind === "video") showVideo(path, name);
+  else if (kind === "image") showImage(path, name);
+  else if (kind === "markdown" || kind === "text") showText(path, name);
+  else if (kind === "pdf") showPdf(path, name);
+  else if (kind === "csv") showCsv(path, name);
+  else if (kind === "archive") showUnpack(path, name);
+  else if (kind === "lnk") showLnk(path, name);
+  else location.href = dlUrl(path);   // 其它类型直接下载
 }
 
 // 文件/目录点击分流（list 行内名称与 grid 卡片共用）：目录进入、锁定提示、视频/文本/压缩包/PDF/CSV/lnk 弹窗、其它下载
@@ -3248,6 +3348,8 @@ function bindRowAction(el, e, locked) {
   const kind = fileKind(e.name);
   if (kind === "video") {
     el.onclick = () => showVideo(e.path, e.name);
+  } else if (kind === "image") {
+    el.onclick = () => showImage(e.path, e.name);
   } else if (kind === "markdown" || kind === "text") {
     el.onclick = () => showText(e.path, e.name);
   } else if (kind === "archive") {
@@ -3272,6 +3374,189 @@ function bindRowAction(el, e, locked) {
     }
   }
 }
+
+// ==================== T9 长按多选模式（批量置顶/分享/下载/打包） ====================
+let bulkMode = false;             // 多选模式是否激活（分享模式永不激活）
+const bulkSelected = new Set();   // 选中的 entry path 集合
+
+// 长按 ~500ms 进入多选（桌面 mousedown / 移动 touchstart；滚动 touchmove 取消）
+// 长按即选中该行，并有按压背景反馈 + 震动提示；长按后的 click 被吞掉避免误开文件
+function bindLongPress(el, e, locked) {
+  let timer = null;
+  const cancel = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    el.classList.remove("press-active");
+  };
+  const start = () => {
+    if (locked || bulkMode || SHARE_MODE) return;
+    cancel();
+    el.classList.add("press-active");
+    timer = setTimeout(() => {
+      timer = null;
+      el.classList.remove("press-active");
+      enterBulkMode();
+      toggleBulkSelect(el, e.path);
+      if (navigator.vibrate) navigator.vibrate(30);   // 触觉反馈
+      // 吞掉长按松手后触发的 click，避免立即再 toggle 一次
+      const swallow = (ev) => { ev.preventDefault(); ev.stopPropagation(); };
+      el.addEventListener("click", swallow, true);
+      setTimeout(() => el.removeEventListener("click", swallow, true), 700);
+    }, 500);
+  };
+  el.addEventListener("mousedown", start);
+  el.addEventListener("touchstart", start, { passive: true });
+  el.addEventListener("mouseup", cancel);
+  el.addEventListener("mouseleave", cancel);
+  el.addEventListener("touchend", cancel);
+  el.addEventListener("touchmove", cancel);
+  el.addEventListener("touchcancel", cancel);
+}
+
+function enterBulkMode() {
+  if (SHARE_MODE || bulkMode) return;
+  bulkMode = true;
+  document.querySelectorAll("#fileRows > .list-group-item, #fileRows > .grid-item").forEach(el => {
+    el.classList.add("bulk-mode");
+  });
+  const bar = $("bulkBar");
+  if (bar) bar.classList.remove("d-none");
+  updateBulkBar();
+  toast("已进入多选模式（点按行勾选）");
+}
+
+function exitBulkMode() {
+  if (!bulkMode) return;
+  bulkMode = false;
+  bulkSelected.clear();
+  document.querySelectorAll("#fileRows > .list-group-item, #fileRows > .grid-item").forEach(el => {
+    el.classList.remove("bulk-mode", "selected", "press-active");
+    const cb = el.querySelector(".bulk-cb input");
+    if (cb) cb.checked = false;
+  });
+  const bar = $("bulkBar");
+  if (bar) bar.classList.add("d-none");
+}
+
+function toggleBulkSelect(el, path) {
+  const cb = el.querySelector(".bulk-cb input");
+  if (bulkSelected.has(path)) {
+    bulkSelected.delete(path);
+    el.classList.remove("selected");
+    if (cb) cb.checked = false;
+  } else {
+    bulkSelected.add(path);
+    el.classList.add("selected");
+    if (cb) cb.checked = true;
+  }
+  updateBulkBar();
+}
+
+function bulkRowEls() {
+  return [...document.querySelectorAll("#fileRows > .list-group-item, #fileRows > .grid-item")];
+}
+
+function updateBulkBar() {
+  const n = bulkSelected.size;
+  const cnt = $("bulkCount");
+  if (cnt) cnt.textContent = "已选 " + n + " 项";
+  const sa = $("bulkSelectAll");
+  if (sa) {
+    const rows = bulkRowEls();
+    sa.textContent = rows.length && rows.every(el => bulkSelected.has(el.dataset.path)) ? "取消全选" : "全选";
+  }
+}
+
+// 全选 / 取消全选
+$("bulkSelectAll").onclick = () => {
+  const rows = bulkRowEls();
+  const allSelected = rows.length && rows.every(el => bulkSelected.has(el.dataset.path));
+  rows.forEach(el => {
+    if (allSelected) {
+      bulkSelected.delete(el.dataset.path);
+      el.classList.remove("selected");
+      const cb = el.querySelector(".bulk-cb input");
+      if (cb) cb.checked = false;
+    } else {
+      bulkSelected.add(el.dataset.path);
+      el.classList.add("selected");
+      const cb = el.querySelector(".bulk-cb input");
+      if (cb) cb.checked = true;
+    }
+  });
+  updateBulkBar();
+};
+
+// 批量置顶 / 取消置顶：逐项调 api/pin，直接用返回值同步 pinned，不重载列表
+async function bulkTogglePin(doPin) {
+  const paths = [...bulkSelected];
+  if (!paths.length) { toast("请先选择文件"); return; }
+  let ok = 0;
+  for (const p of paths) {
+    try {
+      const j = await api("api/pin?add=" + (doPin ? 1 : 0) + "&path=" + encodeURIComponent(p));
+      if (j && Array.isArray(j.pinned)) pinned = j.pinned;   // 后端返回最新 pinned，不再二次 api/info
+      ok++;
+    } catch (e) { /* 单项失败继续 */ }
+  }
+  renderPinned();
+  toast(ok + " 项已" + (doPin ? "置顶" : "取消置顶"));
+  exitBulkMode();
+}
+$("bulkPin").onclick = () => bulkTogglePin(true);
+$("bulkUnpin").onclick = () => bulkTogglePin(false);
+
+// 批量分享：api/share?paths=...（复用 t4 抽的 buildShareModal 工厂）
+$("bulkShare").onclick = () => {
+  const paths = [...bulkSelected];
+  if (!paths.length) { toast("请先选择文件"); return; }
+  buildShareModal({
+    title: "批量分享",
+    headHtml: '<div class="mb-2 text-truncate">将分享选中的 ' + paths.length + ' 个文件</div>',
+    formHtml: '<div class="mb-3">' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="bulkShareHours" id="bs1" value="1"><label class="form-check-label" for="bs1">1 小时</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="bulkShareHours" id="bs24" value="24" checked><label class="form-check-label" for="bs24">1 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="bulkShareHours" id="bs72" value="72"><label class="form-check-label" for="bs72">3 天</label></div>' +
+      '  <div class="form-check"><input class="form-check-input" type="radio" name="bulkShareHours" id="bs168" value="168"><label class="form-check-label" for="bs168">7 天</label></div>' +
+      "</div>",
+    genLabel: "生成链接",
+    gen: async () => {
+      const checked = document.querySelector('input[name="bulkShareHours"]:checked');
+      const hours = checked ? checked.value : "24";
+      const j = await api("api/share?paths=" + encodeURIComponent(paths.join("|")) + "&hours=" + hours);
+      return { ...j, msg: "分享链接已生成（" + paths.length + " 个文件）", note: "有效期至 " + fmtTime(j.expires_at) };
+    },
+  });
+};
+
+// 批量下载：逐个触发下载（目录项跳过）
+$("bulkDownload").onclick = () => {
+  const rows = bulkRowEls().filter(el => bulkSelected.has(el.dataset.path) && el.dataset.dir !== "1");
+  if (!rows.length) { toast("请先选择文件（目录无法直接下载）"); return; }
+  rows.forEach(el => { location.href = dlUrl(el.dataset.path); });
+  toast("已开始下载 " + rows.length + " 个文件");
+};
+
+// 批量打包：直接提交选中项（复用 archive API，不依赖 pinned）
+$("bulkPack").onclick = async () => {
+  const paths = [...bulkSelected];
+  if (!paths.length) { toast("请先选择文件"); return; }
+  try {
+    const r = await fetch(BASE + "api/archive", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, mode: packMode }),
+    });
+    const j = await r.json();
+    if (r.status === 429) { toast("打包任务过多，请稍后再试"); return; }
+    if (!r.ok) { toast((j && j.error) || "提交打包失败（HTTP " + r.status + "）"); return; }
+    openPanel();
+    pollArchives();
+    toast("已提交打包任务");
+    exitBulkMode();
+  } catch (e) { toast("提交失败: " + (e && e.message || e)); }
+};
+
+$("bulkCancel").onclick = exitBulkMode;
 
 $("refreshBtn").onclick = () => { if (cur !== null) loadList(cur); };
 
@@ -3666,8 +3951,7 @@ $("clearPinBtn").onclick = async () => {
   if (!pinned.length) return;
   const j = await api("api/pin?clear=1");
   pinned = (j || {}).pinned || [];
-  renderPinned();
-  loadList(cur);
+  renderPinned();   // 列表行无星标，无需 loadList(cur)（t9）
   if (!$("packPanel").classList.contains("d-none")) createPackPreview();
   toast("已清空全部置顶");
 };
@@ -3709,14 +3993,14 @@ function iconOf(name) {
   if (e === "iso") return "iso";
   if (e === "lnk") return "lnk";
   if (VIDEO_EXT.indexOf(e) >= 0) return "video";
-  if (["jpg","jpeg","png","gif","webp","bmp"].indexOf(e) >= 0) return "image";
+  if (IMAGE_EXT.indexOf(e) >= 0) return "image";   // 与 fileKind 一致：svg/ico 等图片预览
   if (["mp3","flac","wav","m4a","ogg","aac"].indexOf(e) >= 0) return "audio";
   if (["zip","rar","7z","tar","gz"].indexOf(e) >= 0) return "archive";
   if (["doc","docx"].indexOf(e) >= 0) return "doc";
   if (["xls","xlsx","csv"].indexOf(e) >= 0) return "sheet";
   if (["exe","msi"].indexOf(e) >= 0) return "exe";
   if (CODE_EXT.indexOf(e) >= 0) return "code";                 // 含 bat：脚本按文本预览，用 code 图标
-  if (["txt","md","markdown","log","svg"].indexOf(e) >= 0) return "text";  // svg 文本预览（TEXT_EXT），用 text 图标
+  if (["txt","md","markdown","log"].indexOf(e) >= 0) return "text";
   return "file";
 }
 // 图标 URL（目录/锁定由调用方特判，这里只负责普通文件）
@@ -3823,6 +4107,7 @@ async function showCsv(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  addFsButton(body, name, () => body.querySelector(".table") && body.querySelector(".table").parentElement, dlUrl(path));   // ⛶ 全屏放大表格
   });
 }
 
@@ -3835,6 +4120,7 @@ function showPdf(path, name) {
   iframe.src = url;
   iframe.style.cssText = "width:100%;height:60vh;border:0;border-radius:8px;background:#fff";
   body.appendChild(iframe);
+  addFsButton(body, name, () => iframe, dlUrl(path));   // ⛶ 全屏放大 PDF
   // 兜底：浏览器不支持内联 PDF 时，用户可点链接新窗口打开
   const fb = document.createElement("div");
   fb.className = "mt-2 text-center small";
@@ -3849,6 +4135,55 @@ function showPdf(path, name) {
   btns.className = "d-flex flex-wrap gap-2 mt-3";
   btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+}
+
+// 图片在线预览：内联 <img> + 缩放（按钮 +/−/适应宽度 + 滚轮）+ 下载；加载失败提示
+function showImage(path, name) {
+  const body = document.createElement("div");
+  openModal(name, body, { type: "image", path, name });
+  let scale = 1;
+  const wrap = document.createElement("div");
+  wrap.className = "img-preview-wrap";
+  addFsButton(body, name, () => wrap, dlUrl(path));   // ⛶ 全屏放大（大图 contain + 缩放）
+  const img = document.createElement("img");
+  img.className = "img-preview";
+  img.alt = name;
+  // 缩放函数先声明再引用（避免 TDZ）
+  const zoom = (f) => {
+    scale = Math.min(8, Math.max(0.1, scale * f));
+    img.style.maxWidth = "none";
+    img.style.width = Math.round(wrap.clientWidth * scale) + "px";
+    img.style.height = "auto";
+  };
+  const fit = () => {
+    scale = 1;
+    img.style.maxWidth = "100%";
+    img.style.width = "auto";
+    img.style.height = "auto";
+  };
+  // 缩放工具栏
+  const bar = document.createElement("div");
+  bar.className = "d-flex align-items-center gap-2 mb-2";
+  bar.appendChild(mkBtn("＋ 放大", () => zoom(1.25)));
+  bar.appendChild(mkBtn("－ 缩小", () => zoom(0.8)));
+  bar.appendChild(mkBtn("适应宽度", () => fit()));
+  body.appendChild(bar);
+  img.onload = () => fit();
+  img.onerror = () => {
+    wrap.innerHTML = '<p class="muted">图片加载失败或格式不受支持</p>';
+  };
+  // 滚轮缩放（preventDefault 避免滚动穿透弹窗）
+  wrap.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    zoom(ev.deltaY < 0 ? 1.1 : 0.9);
+  }, { passive: false });
+  wrap.appendChild(img);
+  body.appendChild(wrap);
+  const btns = document.createElement("div");
+  btns.className = "d-flex flex-wrap gap-2 mt-3";
+  btns.appendChild(mkBtn("⬇ 下载", () => { location.href = dlUrl(path); }));
+  body.appendChild(btns);
+  img.src = BASE + "api/img?path=" + encodeURIComponent(path);
 }
 
 // ---------------- 功能 5：.lnk 快捷方式跳转（跳到目标位置而非直接打开） ----------------
@@ -3889,6 +4224,7 @@ async function showLnk(path, name) {
   }
   btns.appendChild(mkBtn("⬇ 下载快捷方式本身", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
+  addFsButton(body, name, () => body.querySelector(".p-2.bg-body-secondary") && body.querySelector(".p-2.bg-body-secondary").parentElement, dlUrl(path));   // ⛶ 全屏放大目标信息
   });
 }
 

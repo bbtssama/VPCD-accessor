@@ -516,6 +516,194 @@
     }
     #pinnedCard .card-header { background: rgba(59, 130, 246, .07) !important; }
   }
+
+  /* ==================== T8 UI 精细化升级：专业设计师细节 ==================== */
+  :root {
+    /* 8px 间距栅格（4/8/12/16/24/32）：padding/margin/gap 统一引用 */
+    --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px;
+    --sp-4: 16px; --sp-5: 24px; --sp-6: 32px;
+    /* 文字层级：主 / 次 / 弱 */
+    --brand-text-1: var(--brand-text);
+    --brand-text-2: var(--brand-text-muted);
+    --brand-text-3: #9ca3af;
+    /* 强调色（橙）：仅星标/收藏等点缀使用，蓝保持主色地位 */
+    --brand-accent: #f5a623;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --brand-text-3: #64748b; }
+  }
+
+  /* 1) 星标统一：收藏 #f5a623、未收藏 #ccc（替代散落的 #d97706/#d1d5db） */
+  .star, .grid-star { color: #ccc; }
+  .star.on, .grid-star.on { color: var(--brand-accent); }
+
+  /* 2) 边框统一浅色（outline 按钮边框跟随 --bs-border-color） */
+  .btn-outline-secondary { --bs-btn-border-color: var(--bs-border-color); }
+
+  /* 3) 模态框：关闭按钮 24px + hover 圆圈；开合动画更精致（尊重 reduced-motion） */
+  .btn-close {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background-size: 12px;
+    transition: background-color .15s ease;
+  }
+  .btn-close:hover { background-color: var(--bs-secondary-bg); }
+  .modal.fade .modal-dialog { transform: translateY(16px) scale(.98); transition: transform .25s ease-out; }
+  .modal.show .modal-dialog { transform: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .modal.fade .modal-dialog { transition: none !important; }
+  }
+
+  /* 4) 列表加载骨架屏（app.js 注入 .skeleton-list，shimmer 动画） */
+  .skeleton-list { padding: 2px 14px 6px; }
+  .skeleton-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+  .skeleton-row + .skeleton-row { border-top: 1px solid var(--bs-border-color); }
+  .sk-ic { width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0; }
+  .sk-line { height: 12px; border-radius: 6px; }
+  .sk-line.w40 { width: 40%; } .sk-line.w25 { width: 25%; } .sk-line.w12 { width: 12%; }
+  .sk-ic, .sk-line {
+    background: linear-gradient(90deg, var(--bs-secondary-bg) 25%, var(--bs-tertiary-bg) 50%, var(--bs-secondary-bg) 75%);
+    background-size: 200% 100%;
+    animation: skShimmer 1.4s ease-in-out infinite;
+  }
+  @keyframes skShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+  @media (prefers-reduced-motion: reduce) { .sk-ic, .sk-line { animation: none; } }
+
+  /* 5) 操作图标放大 + hover 反馈 */
+  .star, .grid-star { font-size: 16px; }
+  .info-btn, .grid-info { font-size: 15px; color: var(--brand-text-3); }
+  .share-btn { font-size: 13px; }
+  @media (hover: hover) {
+    .info-btn, .grid-info, .share-btn { transition: color .15s ease, transform .15s ease; }
+    .info-btn:hover, .grid-info:hover, .share-btn:hover { color: var(--bs-primary); transform: scale(1.18); }
+  }
+
+  /* 6) 自定义滚动条：6px 圆角灰 thumb（Webkit + Firefox） */
+  * { scrollbar-width: thin; scrollbar-color: var(--bs-secondary-bg) transparent; }
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: var(--bs-secondary-bg); border-radius: 3px; }
+  *::-webkit-scrollbar-thumb:hover { background: var(--bs-secondary-border-subtle); }
+
+  /* 7) 面包屑当前路径加深 */
+  #breadcrumb .cur { font-weight: 700; color: var(--bs-primary); }
+
+  /* 8) 空状态：图标 + 引导（纯 CSS/emoji，不引外部资源） */
+  .empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: var(--sp-2); padding: var(--sp-6) var(--sp-4);
+    color: var(--brand-text-2);
+  }
+  .empty::before { content: "🗂️"; font-size: 40px; line-height: 1; opacity: .65; filter: grayscale(.25); }
+
+  /* 9) 留白呼吸感：卡片间距 / 列表行高 / 置顶列表内边距微增 */
+  .card.mb-2 { margin-bottom: var(--sp-4) !important; }                    /* 置顶卡间距 8→16px */
+  #pinnedList.card-body { padding-top: var(--sp-3) !important; padding-bottom: var(--sp-3) !important; }
+  .list-group-item { padding-top: .625rem !important; padding-bottom: .625rem !important; }  /* py-2 → py-2.5 */
+
+  /* ---- 10) 视觉审查（mimo-v2.5-free）反馈微调 ---- */
+  .list-group-item .ic img { width: 22px !important; height: 22px !important; }   /* 行图标 20→22px */
+  #driveTabs { margin-bottom: var(--sp-3) !important; }                           /* 盘符栏与置顶卡间距 8→12px */
+  .modal-content { box-shadow: 0 16px 48px rgba(15, 23, 42, .18); }               /* 弹窗阴影增强 */
+  .btn-close { width: 24px !important; height: 24px !important; }
+  @media (prefers-color-scheme: dark) {
+    .modal-content { box-shadow: 0 16px 48px rgba(0, 0, 0, .55); }
+  }
+
+  /* ---- 11) 视觉验收收尾：导航衔接过渡 + 内容区顶部留白 ---- */
+  main { padding-top: var(--sp-4) !important; }   /* 渐变导航下方留白 8→16px，衔接自然 */
+
+  /* ==================== T9 长按多选模式 ==================== */
+  /* 行内多选 checkbox：默认隐藏，进入多选模式（行加 .bulk-mode）后显示 */
+  .bulk-cb { display: none; align-items: center; flex-shrink: 0; }
+  .bulk-mode .bulk-cb { display: inline-flex; align-items: center; margin-right: 2px; }
+  .bulk-cb .form-check-input { margin: 0; cursor: pointer; }
+  /* 多选模式行交互：禁文本选择防误触；选中/按压反馈 */
+  .list-group-item.bulk-mode, .grid-item.bulk-mode { user-select: none; -webkit-user-select: none; }
+  .list-group-item.selected, .grid-item.selected { background: var(--bs-primary-bg-subtle) !important; }
+  .list-group-item.press-active, .grid-item.press-active { background: var(--bs-secondary-bg) !important; }
+  /* 批量操作栏：品牌浅底 + 顶部圆角衔接卡片 */
+  .bulk-bar {
+    background: var(--bs-primary-bg-subtle);
+    border-radius: calc(var(--brand-card-radius) - 1px) calc(var(--brand-card-radius) - 1px) 0 0;
+  }
+
+  /* ==================== T10 图片在线预览 ==================== */
+  .img-preview-wrap {
+    overflow: auto;
+    max-height: 62vh;
+    max-height: 62dvh;
+    text-align: center;
+    background: var(--bs-secondary-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 10px;
+    padding: var(--sp-2);
+    overscroll-behavior: contain;
+  }
+  .img-preview {
+    max-width: 100%;
+    height: auto;
+    border-radius: 6px;
+    display: inline-block;
+  }
+
+  /* ==================== T11 全屏预览层（方案A；为方案B 独立页面铺路） ==================== */
+  .fs-layer {
+    position: fixed; inset: 0; z-index: 1090;
+    background: rgba(9, 13, 20, .96);
+    display: flex; flex-direction: column;
+    opacity: 0; pointer-events: none;
+    transition: opacity .22s ease;
+  }
+  .fs-layer.show { opacity: 1; pointer-events: auto; }
+  .fs-bar {
+    display: flex; align-items: center; gap: var(--sp-2);
+    padding: calc(10px + env(safe-area-inset-top)) var(--sp-4) 10px;
+    color: #fff; flex-shrink: 0;
+    background: rgba(255, 255, 255, .06);
+    border-bottom: 1px solid rgba(255, 255, 255, .12);
+  }
+  .fs-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .fs-close {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: none; background: rgba(255, 255, 255, .14); color: #fff;
+    font-size: 15px; cursor: pointer;
+    transition: background-color .15s ease, transform .15s ease;
+  }
+  .fs-close:hover { background: rgba(255, 255, 255, .3); transform: scale(1.08); }
+  #fsBody {
+    flex: 1; min-height: 0; overflow: auto;
+    display: flex; align-items: center; justify-content: center;
+    padding: var(--sp-2);
+    transform: scale(.97); transition: transform .22s ease;
+  }
+  .fs-layer.show #fsBody { transform: scale(1); }
+  /* 全屏内：视频/图片最大化 contain；文本/代码全屏滚动 */
+  #fsBody .video-wrap {
+    max-height: none; height: 100%; width: 100%;
+    background: transparent; border-radius: 0;
+  }
+  #fsBody video { max-height: 100%; max-width: 100%; width: auto; height: auto; object-fit: contain; }
+  #fsBody .img-preview-wrap {
+    max-height: none; max-width: none; height: 100%; width: 100%;
+    background: transparent; border: none; padding: 0;
+  }
+  #fsBody .img-preview { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
+  #fsBody .text-pre, #fsBody .md-code {
+    height: 100%; max-height: none; font-size: 14px;
+    background: transparent; border: none;
+  }
+  #fsBody .md-table, #fsBody .unpack-list { max-height: none; }
+  #fsBody iframe { width: 100%; height: 100%; border: 0; border-radius: 8px; background: #fff; }
+  #fsBody .fs-dl { color: #fff; border-color: rgba(255,255,255,.4); }
+  @media (prefers-reduced-motion: reduce) {
+    .fs-layer, #fsBody { transition: none; }
+  }
+
+  /* ==================== T12 自定义 clickable 元素防文本选中（点击不出现复制光标） ==================== */
+  #pinnedHead { user-select: none; -webkit-user-select: none; cursor: pointer; }   /* 置顶折叠头 */
+  #breadcrumb .seg, #breadcrumb .cur { user-select: none; -webkit-user-select: none; }  /* 面包屑 */
+  .pk-dir-btn, .grid-info, .vtag, #packMiniBar { user-select: none; -webkit-user-select: none; }  /* 其余自定义交互点 */
 </style>
 </head>
 <body class="bg-body-tertiary">
@@ -580,6 +768,20 @@
 
   <!-- 文件列表（list-group） -->
   <div class="card shadow-sm">
+    <!-- 批量操作栏（长按进入多选模式后显示） -->
+    <div id="bulkBar" class="bulk-bar d-none">
+      <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom">
+        <span class="fw-semibold small flex-shrink-0" id="bulkCount">已选 0 项</span>
+        <button type="button" id="bulkSelectAll" class="btn btn-sm btn-outline-primary flex-shrink-0">全选</button>
+        <button type="button" id="bulkPin" class="btn btn-sm btn-outline-primary flex-shrink-0" title="置顶选中的文件">📌 置顶</button>
+        <button type="button" id="bulkUnpin" class="btn btn-sm btn-outline-warning flex-shrink-0" title="取消置顶">✕ 取消置顶</button>
+        <button type="button" id="bulkShare" class="btn btn-sm btn-outline-primary flex-shrink-0" title="批量生成分享链接">🔗 分享</button>
+        <button type="button" id="bulkDownload" class="btn btn-sm btn-outline-primary flex-shrink-0" title="下载选中的文件">⬇ 下载</button>
+        <button type="button" id="bulkPack" class="btn btn-sm btn-primary flex-shrink-0" title="打包选中的文件">📦 打包</button>
+        <span class="flex-grow-1"></span>
+        <button type="button" id="bulkCancel" class="btn btn-sm btn-outline-secondary flex-shrink-0" title="退出多选">✕ 取消</button>
+      </div>
+    </div>
     <div id="fuzzyHint" class="render-tip d-none" style="padding:6px 14px 0"></div>
     <ul id="fileRows" class="list-group list-group-flush"></ul>
   </div>
@@ -627,6 +829,17 @@
       <div class="modal-body" id="appModalBody"></div>
     </div>
   </div>
+</div>
+
+<!-- 全屏预览层（方案A：预览弹窗内 ⛶ 放大；样式与 modal 解耦，供方案B /view 独立页复用） -->
+<div id="fsLayer" class="fs-layer" aria-label="全屏预览">
+  <div class="fs-bar">
+    <span class="fs-title" id="fsTitle"></span>
+    <span class="flex-grow-1"></span>
+    <span id="fsBarDl"></span>
+    <button type="button" class="fs-close" id="fsClose" aria-label="退出全屏">✕</button>
+  </div>
+  <div id="fsBody" class="fs-content"></div>
 </div>
 
 <!-- 右侧滑出侧边栏：视图切换 / 类型筛选 / 排序 / 搜索 -->

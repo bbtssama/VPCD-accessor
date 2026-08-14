@@ -897,6 +897,16 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             self._send_file_range(p, attachment=False, ctype="application/pdf", err="PDF 不可用")
             return
+        if sub == "api/img":
+            p = self._resolve_share_path(share, q.get("path") or "")
+            if p is None or not os.path.isfile(p):
+                self._send_error_page("图片不存在或越界", str(p))
+                return
+            ext = os.path.splitext(p)[1].lstrip(".").lower()
+            self._send_file_range(p, attachment=False,
+                                  ctype=_MIME_BY_EXT.get(ext, "application/octet-stream"),
+                                  err="图片不可用")
+            return
         if sub in ("api/stream", "api/trans", "api/transstatus", "api/transdl",
                    "api/subtitle", "api/asr", "api/vthumbstrip", "api/vframes",
                    "api/vinfo"):
@@ -1161,6 +1171,16 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 self._send_error_page("PDF 不存在或越界", str(p))
                 return
             self._send_file_range(p, attachment=False, ctype="application/pdf", err="PDF 不可用")
+        elif route == "/api/img":
+            # 图片内联预览：ctype 按扩展名取 MIME（_MIME_BY_EXT），浏览器内联渲染 <img>
+            p = self._resolve(q.get("path") or "")
+            if p is None or not os.path.isfile(p):
+                self._send_error_page("图片不存在或越界", str(p))
+                return
+            ext = os.path.splitext(p)[1].lstrip(".").lower()
+            self._send_file_range(p, attachment=False,
+                                  ctype=_MIME_BY_EXT.get(ext, "application/octet-stream"),
+                                  err="图片不可用")
         elif route == "/api/share":
             # 创建分享：只暴露该目录/文件本身，链接与主 token 无关，最长 7 天
             # 多文件分享：?paths=<p1>|<p2>|...（用 | 分隔，与 dlzip 一致）；
