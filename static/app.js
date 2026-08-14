@@ -1959,6 +1959,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   let mimeCache = {};      // key=path|q → MSE mime（动态 codec，修复高清/标清/低清播不了）
   let mseDuration = 0;     // 源时长（vinfo 提供）；用于设置 MediaSource.duration，否则 seek 到缓冲外会被钳制到缓冲末尾
   let mseSeekGuard = 0;    // 重建时间戳：buildMse 重建期间/刚重建后忽略 seeking 事件，防止浏览器自动跳转触发二次重建循环
+  let mseRetry = 0;        // append 失败重建重试计数（限 3 次，成功即清零）
   let transPoll = null;    // { gen, timer, q } 原生转码档 409 轮询状态
   let mseBuildSeq = 0;     // buildMse 请求序号：并发时只保留最后一次
   let pendingAsrLoad = false;
@@ -2245,7 +2246,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     }
     mseFallbackDone = false;
     const ms = new MediaSource();
-    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start: 0, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0 };
+    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start: 0, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: null };
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
     lastMsUrl = URL.createObjectURL(ms);
     v.src = lastMsUrl;
@@ -2303,8 +2304,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       } else {
         pump();                  // remove 失败（无可清缓冲）：直接拉新流
       }
-      // 直接把 currentTime 设为 t：guard 窗口内 seeking 被忽略；数据 append 后浏览器自动完成跳转
-      try { v.currentTime = t; } catch (e) { /* 忽略 */ }
+      // 不在这里直接设 currentTime：remove 清空缓冲后浏览器会把 currentTime 重置为 0，
+      // 等新流首段数据 append 就绪（buffered 覆盖 t）后再拨过去（见 pump 的 pendingSeek 处理）
+      mse.pendingSeek = t;
     } else {
       pump();
     }
@@ -2340,6 +2342,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     mse.offset = 0;
     mse.buf = new Uint8Array(0);
     mse.wantAppend = false;
+    mse.pendingSeek = t;   // 重建后等新流首段就绪再拨 currentTime（避免归 0 卡在缓冲外）
     const ms = new MediaSource();
     mse.ms = ms;
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
@@ -2382,7 +2385,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   }
 
   function pump() {
-    if (!mse || !mse.sb || mse.fetching) return;
+    if (!mse || !mse.sb) return;
+    if (mse.fetching) { mse.wantAppend = true; return; }   // 修复：当前有 fetch 在飞时标记待续拉，旧响应释放 fetching 后补拉
     if (mse.sb.updating) { mse.wantAppend = true; return; }
     mse.fetching = true;
     const myGen = mse.gen;
@@ -2395,8 +2399,13 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         const done = res.headers.get("X-Trans-Finished") === "1";
         const newOff = parseInt(res.headers.get("X-Trans-Offset") || "0", 10);
         const blob = await res.blob();
-        if (!mse || mse.gen !== myGen || mse.fetchSeq !== myFetch) return;    // 旧代/旧 seek 的响应丢弃
+        // 先释放 fetching（旧代响应也必须释放，否则 seek/重建后的新 pump 永远被 fetching=true 挡住）
         mse.fetching = false;
+        if (!mse || mse.gen !== myGen || mse.fetchSeq !== myFetch) {
+          // 旧代/旧 seek 的响应丢弃；若期间有拉取意图（wantAppend 被 pump 挡下时置位），补一次 pump
+          if (mse && mse.sb && mse.wantAppend) { mse.wantAppend = false; pump(); }
+          return;
+        }
         if (!mse || !mse.sb) return;
         if (blob.size > 0) {
           const arr = new Uint8Array(await blob.arrayBuffer());
@@ -2407,14 +2416,30 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
             mse.sb.appendBuffer(arr);
             if (done) { try { mse.ms.endOfStream(); } catch (e) { /* 忽略 */ } }
             else { mse.wantAppend = true; }  // 修复：append 完成后续拉下一段（updateend 触发 pump）
+            mseRetry = 0;   // 拉流成功：重置重建重试计数
+            // 挂起的 seek 目标：新流首段已就绪（buffered 已覆盖目标），把 currentTime 拨过去。
+            // 设置时刷新 guard，防止触发的 seeking 再次进入防抖重建。
+            if (mse.pendingSeek != null) {
+              const pt = mse.pendingSeek;
+              mse.pendingSeek = null;
+              mseSeekGuard = Date.now();
+              try { v.currentTime = pt; } catch (e) { /* 忽略 */ }
+            }
           } catch (e) {
             if (e.name === "QuotaExceededError") { trimAndAppend(arr); return; }
-            // 原画档 append 失败：多为 vinfo 探测失败的兜底 MIME（avc1.640033）与实际流
-            // （如 baseline avc1.42E01F）不匹配 → 降级高清重播；转码档 640033 必然匹配
+            // append 失败（典型：HTMLMediaElement.error 已置位，通常是后端流时序/会话竞态导致的瞬时问题）：
+            // 原画档先降级高清；高清/后续仍失败则重建 MediaSource 重试当前画质（限 3 次），而非直接放弃黑屏。
             if (q === "original" && !mseFallbackDone && mse.gen === myGen) {
               mseFallbackDone = true;
-              toast("原画流与浏览器不兼容，已切换高清播放");
+              mseRetry = 0;
+              toast("原画流不可用，已切换高清播放");
               qSel.value = "high";
+              buildMse(v.currentTime || 0).catch(() => { /* 异步内部已兜底 */ });
+              return;
+            }
+            if (mseRetry < 3) {
+              mseRetry++;
+              toast("播放流异常，正在重试…");
               buildMse(v.currentTime || 0).catch(() => { /* 异步内部已兜底 */ });
               return;
             }
@@ -2422,7 +2447,13 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
           }
         } else {
           if (!mse || mse.gen !== myGen) return;
-          if (done) { try { mse.ms.endOfStream(); } catch (e) { /* 忽略 */ } return; }
+          if (done) {
+            // 缓冲完全为空（初始化段都未 append）时，endOfStream 会触发 DEMUXER_ERROR 黑屏且不可恢复；
+            // 明确报错而非静默失败，让用户/重试机制有机会处理
+            try { if (!v.buffered.length) { showErr("视频流不可用（转码或封装失败）"); return; } } catch (e) { /* 忽略 */ }
+            try { mse.ms.endOfStream(); } catch (e) { /* 忽略 */ }
+            return;
+          }
           setTimeout(() => { if (mse) pump(); }, 200);
         }
       })
@@ -2464,19 +2495,28 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       else loadSubtitle();
     } else { clearSubOverlay(); removeTrack(); subMode = "none"; }
   };
-  // MSE 模式：拖动进度条到缓冲外某点 → 从该点重建连续流（seekMse）。
-  // 用 seeking 而非 seeked：目标超出已缓冲范围时浏览器永远不完成 seek（seeked 不触发），
-  // 必须立即重建；缓冲内 seek 浏览器直接处理，无需重建。
-  // mseSeekGuard：buildMse 重建（seek/切画质）后新流时间戳偏移、浏览器自动跳转期间会触发
-  // seeking（t 与缓冲起点一致/或归 0），guard 窗口内忽略，避免二次重建循环。
+  // MSE 模式：拖动进度条 → 防抖后按最终位置判断是否重建（seekMse）。
+  // 连续拖动会触发多次 seeking：若每次立即 seekMse 会反复清空缓冲（"卡一下好一下"交替），
+  // 若用固定 guard 忽略又会漏掉最终位置（currentTime 与流脱节卡死）。
+  // 统一在拖动停止 250ms 后按最终 currentTime 处理一次；重建窗口内（guard 1s）的 seeking
+  // 延后重试，保证拖动结束后的最终位置必定生效。
+  let mseSeekDebounce = null;
   v.addEventListener("seeking", () => {
-    if (mse && mse.sb) {
-      if (Date.now() - mseSeekGuard < 1500) return;
+    if (!mse) return;
+    const trySeek = () => {
+      if (!mse || !mse.sb) return;
+      if (Date.now() - mseSeekGuard < 1000) {
+        // 上一轮 seek 重建窗口内：延后重试（用户可能仍在拖动，最终位置必须生效）
+        mseSeekDebounce = setTimeout(trySeek, 200);
+        return;
+      }
       const t = v.currentTime || 0;
       let bufStart = 0, bufEnd = 0;
       try { if (v.buffered.length) { bufStart = v.buffered.start(0); bufEnd = v.buffered.end(v.buffered.length - 1); } } catch (e) { /* 忽略 */ }
       if (t < bufStart - 1 || t > bufEnd + 1) seekMse(t);
-    }
+    };
+    clearTimeout(mseSeekDebounce);
+    mseSeekDebounce = setTimeout(trySeek, 250);
   });
 
   // ---- 进度条预览（桌面 + 移动端 + 视频未加载也能预览） ----
