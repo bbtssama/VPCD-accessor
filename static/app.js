@@ -1676,6 +1676,33 @@ function showVideo(path, name) {
   v.crossOrigin = "anonymous";
   wrap.appendChild(v);
   body.appendChild(wrap);
+  // ---- 固定视窗宽高比（依据源视频宽高与旋转）：切画质/切模式时分辨率变化，
+  // video 元素高度不再跳动 → 播放器视窗/弹窗布局稳定不闪烁 ----
+  function setViewportRatio(w, h, rot) {
+    if (!(w > 0) || !(h > 0)) return;
+    const swapped = (rot || 0) % 180 !== 0;   // 旋转 90/270：宽高互换
+    const ratio = (swapped ? h : w) / (swapped ? w : h);
+    try { wrap.style.aspectRatio = String(ratio); } catch (e) { /* 忽略 */ }
+    try { v.style.aspectRatio = String(ratio); } catch (e) { /* 忽略 */ }
+  }
+  // 切换播放源（画质/模式）前定格当前帧作为 poster：重新加载期间画面不闪黑。
+  // 播放恢复（新流首帧可渲染：loadeddata/canplay/playing 任一）时清除定格帧；
+  // 多事件兜底——MSE 下 loadeddata 时序不稳定，单一事件可能漏清导致画面永久定格。
+  function freezeFrame() {
+    try {
+      if (!v.videoWidth || !v.videoHeight) return;
+      const canvas = document.createElement("canvas");
+      canvas.width = v.videoWidth;
+      canvas.height = v.videoHeight;
+      canvas.getContext("2d").drawImage(v, 0, 0);
+      v.poster = canvas.toDataURL("image/jpeg", 0.6);
+      const clear = () => {
+        v.removeAttribute("poster");   // 必须 removeAttribute：poster="" 会被解析为相对 URL（页面地址）而非清空
+        ["loadeddata", "canplay", "playing"].forEach(evt => v.removeEventListener(evt, clear));
+      };
+      ["loadeddata", "canplay", "playing"].forEach(evt => v.addEventListener(evt, clear));
+    } catch (e) { /* 忽略 */ }
+  }
   // ---- 进度条预览（缩略图条 + 单帧） ----
   const prev = document.createElement("div");
   prev.className = "video-preview";
@@ -2019,16 +2046,19 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     if (resume > 0) {
       const onLoaded = () => {
         v.removeEventListener("loadedmetadata", onLoaded);
+        v.removeAttribute("poster");   // 清除切换前的定格帧（画面已恢复）；poster="" 会被当相对 URL
         try { if (Math.abs(v.currentTime - resume) > 1) v.currentTime = resume; } catch (e) { /* 忽略 */ }
         v.play().catch(() => { /* 用户手势后静默 */ });
       };
       v.addEventListener("loadedmetadata", onLoaded);
     } else {
+      v.removeAttribute("poster");   // 无位置恢复：直接清除定格帧
       v.play().catch(() => { /* 用户手势后静默 */ });
     }
   }
 
   function playNative(resumePos) {
+    freezeFrame();   // 定格当前帧作 poster：切回原生（换 src 重新加载）期间画面不闪黑
     stopTransPoll();
     subMode = "none";
     clearSubOverlay();
@@ -2239,6 +2269,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     return fallback;
   }
   async function startMse(startPos) {
+    freezeFrame();   // 定格当前帧：原生→MSE 切换（换 blob src）期间画面不闪黑
     stopTransPoll();
     if (mse) { stopStream(); }
     if (!window.MediaSource || !window.MediaSource.isTypeSupported) {
@@ -2254,7 +2285,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       return;
     }
     const ms = new MediaSource();
-    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: start || null, q };
+    mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: start, q };
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
     lastMsUrl = URL.createObjectURL(ms);
     v.src = lastMsUrl;
@@ -2324,6 +2355,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   async function buildMse(t) {
     if (!mse) return;
+    freezeFrame();   // 定格当前帧：original↔转码档重建（换 blob src）期间画面不闪黑
     mseSeekGuard = Date.now();   // 重建期间忽略 seeking（新流时间戳偏移后浏览器自动跳转，防止触发二次重建）
     const mySeq = ++mseBuildSeq;          // 连续 seek/切画质只保留最后一次
     const q = qSel.value;
@@ -2428,6 +2460,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
               const pt = mse.pendingSeek;
               mse.pendingSeek = null;
               mseSeekGuard = Date.now();
+              v.removeAttribute("poster");   // 清除切换/seek 前的定格帧（新流首帧已渲染）；poster="" 会被当相对 URL
               try { v.currentTime = pt; } catch (e) { /* 忽略 */ }
             }
           } catch (e) {
@@ -2567,6 +2600,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         if (!j) return;
         const d = parseFloat(j.duration);
         if (Number.isFinite(d) && d > 0) previewDur = d;
+        // 固定视窗宽高比（切画质/切模式时布局不跳动）
+        if (j.width && j.height) setViewportRatio(j.width, j.height, j.rotation);
       })
       .catch(() => { /* vinfo 失败：预览等 loadedmetadata 后仍可用 */ });
   }
