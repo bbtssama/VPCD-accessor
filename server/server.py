@@ -34,6 +34,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -105,6 +106,7 @@ _SHARE_ALLOWED_HOURS = (1, 24, 72, 168)
 # 前端已拆分为独立文件（templates/index.html + static/app.js），便于维护与并行开发；
 # 每次请求读取以支持模板热更新（文件小，开销可忽略）。
 _TPL_PATH = os.path.join(BASE_DIR, "templates", "index.html")
+_VIEW_TPL_PATH = os.path.join(BASE_DIR, "templates", "view.html")  # T18：独立预览页模板
 
 
 def _load_index_html() -> str:
@@ -114,6 +116,15 @@ def _load_index_html() -> str:
             return fh.read()
     except OSError:
         return "<!doctype html><html><body style='font-family:sans-serif;padding:40px'>模板缺失: %s</body></html>" % _TPL_PATH
+
+
+def _load_view_html() -> str:
+    """读取独立预览页模板（T18 方案B：/view 沉浸式新页面）。"""
+    try:
+        with open(_VIEW_TPL_PATH, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return "<!doctype html><html><body>预览页模板缺失</body></html>"
 
 
 # ------------------------------------------------------------------- 服务器
@@ -134,6 +145,15 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _send_view_html(self):
+        data = _load_view_html().encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _send_html(self):
         data = _load_index_html().encode("utf-8")
         self.send_response(200)
@@ -148,7 +168,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
 
         白名单 + basename 双重校验，杜绝路径穿越：
           * 顶层文件：bootstrap.min.css / bootstrap.bundle.min.js / app.js / highlight.min.js
-          * 图标目录：static/icons/<name>.svg（name 由白名单+扩展名校验）
+          * 图标目录：static/icons/<name>.svg 与 static/icons/color/<name>.svg
+            （T34 彩色图标子目录；normpath 后必须仍落在 icons/ 内）
 
         缓存策略（防夸克式激进缓存拿到旧版 app.js）：
         静态资源 URL 无版本号，故禁绝长缓存—— Cache-Control: no-cache 允许浏览器存储，
@@ -160,7 +181,10 @@ class _DriveHandler(BaseHTTPRequestHandler):
         if name in _STATIC_ALLOWED and "/" not in rel:
             spath = os.path.join(STATIC_DIR, name)
         elif rel.startswith("icons/") and name.endswith(".svg") and "/" not in name:
-            spath = os.path.join(STATIC_DIR, "icons", name)
+            spath = os.path.normpath(os.path.join(STATIC_DIR, rel))   # 保留 icons/color/ 子目录
+            if not spath.startswith(STATIC_DIR + os.sep + "icons" + os.sep):
+                self._send_json({"error": "404"}, 404)
+                return
         else:
             self._send_json({"error": "404"}, 404)
             return
@@ -685,6 +709,14 @@ class _DriveHandler(BaseHTTPRequestHandler):
             # 分享页 = 主站模板（同一份 index.html + app.js）
             self._send_html()
             return
+        if sub == "view":
+            # T18 方案B：分享模式独立预览页（_resolve_share_path 校验）
+            p = self._resolve_share_path(share, q.get("path") or "")
+            if p is None or not os.path.exists(p):
+                self._send_json({"error": "路径越界或不存在"}, 403)
+                return
+            self._send_view_html()
+            return
         q = self._query()
         if sub == "api/info":
             info = {
@@ -702,7 +734,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 info["multi"] = True
                 if share.get("virtual"):
                     info["virtual"] = True
-                    info["root_name"] = share.get("name") or "置顶分享"
+                    info["root_name"] = share.get("name") or "收藏分享"   # T36：置顶→收藏 文案统一
                     info["files"] = [os.path.realpath(f) for f in files]
                 else:
                     items = []
@@ -744,6 +776,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         st = os.stat(real)
                     except OSError:
                         continue
+                    if q.get("show_hidden") != "1" and _is_hidden_entry(os.path.basename(real) or real, st):
+                        continue   # T37：虚拟分享隐藏过滤（按真实文件名/属性）
                     entries.append({
                         "name": rest,
                         "path": key,
@@ -751,6 +785,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         "size": None if node["is_dir"] else st.st_size,
                         "mtime": int(st.st_mtime),
                         "locked": False,
+                        "denied": node["is_dir"] and _dir_denied(real),
                     })
                 entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
                 if q.get("meta") == "1":
@@ -780,6 +815,8 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         st = os.stat(f)
                     except OSError:
                         continue
+                    if q.get("show_hidden") != "1" and _is_hidden_entry(os.path.basename(f) or f, st):
+                        continue   # T37：多文件分享隐藏过滤
                     entries.append({
                         "name": os.path.basename(f) or f,
                         "path": f,
@@ -787,6 +824,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         "size": None if is_dir else st.st_size,
                         "mtime": int(st.st_mtime),
                         "locked": False,
+                        "denied": is_dir and _dir_denied(f),
                     })
                 entries.sort(key=lambda x: (not x["is_dir"], x["name"].lower()))
                 if q.get("meta") == "1":
@@ -826,7 +864,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                     }],
                 })
                 return
-            data = _list_dir(p)
+            data = _list_dir(p, q.get("show_hidden") == "1")   # T37：分享模式同逻辑
             if data is None:
                 self._send_json({"error": "没有权限访问该目录", "parent": None}, 403)
                 return
@@ -928,7 +966,14 @@ class _DriveHandler(BaseHTTPRequestHandler):
             if p is None or not os.path.isfile(p):
                 self._send_json({"error": "路径越界或不存在"}, 403)
                 return
-            self._send_json(_unpack_list(p))
+            self._send_json(_unpack_list(p, q.get("dir") or ""))
+            return
+        if sub == "api/unpackdir":
+            p = self._resolve_share_path(share, q.get("path") or "")
+            if p is None or not os.path.isfile(p):
+                self._send_json({"error": "路径越界或不存在"}, 403)
+                return
+            self._send_json(_unpack_list(p, q.get("dir") or ""))
             return
         if sub == "api/unpackdl":
             arch = self._resolve_share_path(share, q.get("archive") or "")
@@ -948,11 +993,19 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             new_tok = secrets.token_urlsafe(9)
             now = time.time()
+            # T35 时间钳制：子分享过期 = min(请求过期, 父分享剩余)，防恶意延长。
+            # sharesub 不接收独立有效期 → 请求值即继承父分享过期时间；显式钳制并
+            # 拒绝已过期父分享（route 层 _share_expired 已兜底，此处再防御一层）。
+            requested = share["expires_at"]
+            expires_at = min(requested, share["expires_at"])
+            if expires_at <= now:
+                self._send_json({"error": "父分享已过期，无法二次分享"}, 403)
+                return
             _shares[new_tok] = {
                 "root": p,
                 "is_dir": os.path.isdir(p),
-                # 继承父分享的 expires_at（共享同一个过期时间）
-                "expires_at": share["expires_at"],
+                # T35：继承父分享的 expires_at（钳制后），父过期则子也视为过期
+                "expires_at": expires_at,
                 "created_at": now,
                 "name": os.path.basename(p) or p,
                 "parent": tok,
@@ -1061,6 +1114,13 @@ class _DriveHandler(BaseHTTPRequestHandler):
 
         if route == "/":
             self._send_html()
+        elif route == "/view":
+            # T18 方案B：独立预览页（校验 path 与 /api/* 一致，防止越界）
+            p = self._resolve(q.get("path") or "")
+            if p is None or not os.path.exists(p):
+                self._send_json({"error": "路径越界或不存在"}, 403)
+                return
+            self._send_view_html()
         elif route.startswith("/static/"):
             # 离线内置 Bootstrap 静态资源（白名单文件名，杜绝路径穿越）
             self._send_static(route)
@@ -1078,7 +1138,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
             if p is None:
                 self._send_json({"error": "路径越界或不存在"}, 403)
                 return
-            data = _list_dir(p)
+            data = _list_dir(p, q.get("show_hidden") == "1")   # T37
             if data is None:
                 self._send_json({"error": "没有权限访问该目录",
                                  "parent": _parent_of(p, self.server.roots)}, 403)
@@ -1220,7 +1280,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                     "is_dir": False,
                     "expires_at": now + hours * 3600,
                     "created_at": now,
-                    "name": "置顶分享(%d 个)" % len(files),
+                    "name": "收藏分享(%d 个)" % len(files),   # T36：置顶→收藏 文案统一
                     "multi": True,
                     "virtual": True,
                     "nodes": _build_virtual_nodes(files),
@@ -1316,14 +1376,21 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(_read_text(p, _parse_read_limit(q)))
         elif route == "/api/unpack":
-            # 压缩包条目列表（仅 zip）
+            # 压缩包条目列表（层级：dir 指定包内目录前缀，缺省根层）
             p = self._resolve(q.get("path") or "")
             if p is None or not os.path.isfile(p):
                 self._send_json({"error": "路径越界或不存在"}, 403)
                 return
-            self._send_json(_unpack_list(p))
+            self._send_json(_unpack_list(p, q.get("dir") or ""))
+        elif route == "/api/unpackdir":
+            # 压缩包内指定目录的子条目（层级浏览入口）
+            p = self._resolve(q.get("path") or "")
+            if p is None or not os.path.isfile(p):
+                self._send_json({"error": "路径越界或不存在"}, 403)
+                return
+            self._send_json(_unpack_list(p, q.get("dir") or ""))
         elif route == "/api/unpackdl":
-            # 下载压缩包内的单个条目（zip 流式）
+            # 下载压缩包内的单个条目（zip/tar/rar/7z）
             arch = self._resolve(q.get("archive") or "")
             entry = q.get("entry") or ""
             if arch is None or not os.path.isfile(arch):
@@ -1461,11 +1528,14 @@ class _DriveHandler(BaseHTTPRequestHandler):
             fname = getattr(field, "filename", None)
             if not fname:
                 continue
-            # 修复浏览器中文文件名可能出现的编码错乱
+            # 修复浏览器中文文件名可能出现的编码错乱：UTF-8 浏览器 → utf-8；GBK 浏览器 → gbk
             try:
                 fname = fname.encode("latin-1").decode("utf-8")
             except (UnicodeEncodeError, UnicodeDecodeError):
-                pass
+                try:
+                    fname = fname.encode("latin-1").decode("gbk")
+                except (UnicodeEncodeError, UnicodeDecodeError):
+                    pass
             name = os.path.basename(fname) or "file"
             dest = os.path.join(target, name)
             try:
@@ -1644,11 +1714,50 @@ def _fixed_drives():
     return drives or ["C:\\"]
 
 
-def _list_dir(path):
+def _dir_denied(path):
+    """轻量检测目录是否不可读/不可进入（供列表条目标记 denied=True）。
+
+    Windows 上 os.access 走 CRT _waccess，只查存在性不查 ACL（实测对被
+    icacls 拒绝的目录仍返回 True），因此用 scandir 只读第一条试探——
+    FindFirstFile 需要 FILE_LIST_DIRECTORY 权限，与用户点击进入目录时的
+    真实行为完全一致；仅一次句柄打开 + 首条读取，远轻于完整 listdir。
+    非 Windows 回退 os.access(R_OK|X_OK)（POSIX 下权限位判定正确）。
+    """
+    if os.name == "nt":
+        try:
+            with os.scandir(path) as it:
+                try:
+                    next(it)
+                except StopIteration:
+                    pass
+            return False
+        except OSError:
+            return True
+    return not os.access(path, os.R_OK | os.X_OK)
+
+
+def _is_hidden_entry(name, st):
+    """判断条目是否应视为隐藏文件（show_hidden=0 时过滤）：
+    - 名称以 "." 开头（点文件）或以 "~" 开头（临时文件 / Office 锁定文件 ~$xxx）
+    - Windows HIDDEN 属性(0x2)；但带 SYSTEM 属性(0x4) 的条目不隐藏——
+      F: System Volume Information 等系统目录（Hidden+System）必须继续显示（denied 演示依赖）
+    """
+    if name.startswith(".") or name.startswith("~"):
+        return True
+    attrs = getattr(st, "st_file_attributes", 0)
+    if attrs & 0x4:          # SYSTEM：永不因属性隐藏
+        return False
+    return bool(attrs & 0x2)  # HIDDEN
+
+
+def _list_dir(path, show_hidden=False):
     """列出目录内容（目录在前，按名排序）。权限错误返回 None。
 
     系统锁定的根级噪声文件（DumpStack.log、hiberfil.sys 等）保留在列表中，
     但标记 locked=True，前端以灰色显示并提示"无法下载"。
+    目录若 _dir_denied 检测不可读/不可进入，标记 denied=True，
+    前端拦截点击并提示"无权限访问该目录"（条目仍展示，便于用户知晓其存在）。
+    show_hidden=True 时不过滤隐藏条目（T37：默认隐藏，前端开关驱动）。
     """
     noise = _SYSTEM_NOISE
     out = []
@@ -1658,6 +1767,9 @@ def _list_dir(path):
                 try:
                     is_dir = e.is_dir(follow_symlinks=False)
                     st = e.stat(follow_symlinks=False)
+                    if not show_hidden and _is_hidden_entry(e.name, st):
+                        continue   # T37：隐藏文件过滤
+                    denied = is_dir and _dir_denied(e.path)
                     out.append({
                         "name": e.name,
                         "path": os.path.join(path, e.name),
@@ -1665,6 +1777,7 @@ def _list_dir(path):
                         "size": None if is_dir else st.st_size,
                         "mtime": int(st.st_mtime),
                         "locked": not is_dir and e.name.lower() in noise,
+                        "denied": denied,
                     })
                 except OSError:
                     continue
@@ -1693,7 +1806,7 @@ _TEXT_EXT = {
 _MD_EXT = {"md", "markdown"}
 _PDF_EXT = {"pdf"}
 _LNK_EXT = {"lnk"}
-_ARCHIVE_EXT = {"zip", "rar"}
+_ARCHIVE_EXT = {"zip", "rar", "7z", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz"}
 _SYSTEM_NOISE = {"dumpstack.log", "dumpstack.log.tmp", "hiberfil.sys",
                  "pagefile.sys", "swapfile.sys"}
 
@@ -1956,8 +2069,8 @@ _CODE_EXT = {"js", "ts", "jsx", "tsx", "py", "java", "c", "cpp", "h", "hpp",
              "scss", "xml", "yaml", "yml", "toml", "sql", "json"}
 _PLAIN_TEXT_EXT = {"txt", "log", "md", "markdown", "csv", "ini", "conf", "cfg",
                    "env", "srt", "sub", "vtt", "nfo", "rtf", "pdf"}
-_ARCHIVE_KIND_EXT = {"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "zst",
-                     "cab", "jar", "iso"}
+_ARCHIVE_KIND_EXT = {"zip", "rar", "7z", "tar", "tgz", "tbz2", "txz",
+                     "gz", "bz2", "xz", "zst", "cab", "jar", "iso"}
 _EXE_EXT = {"exe", "msi", "apk", "com", "scr", "bat", "cmd"}
 _MIME_BY_EXT = {
     # image
@@ -1984,8 +2097,10 @@ _MIME_BY_EXT = {
     "sql": "application/sql", "yaml": "application/yaml", "yml": "application/yaml",
     # archive
     "zip": "application/zip", "rar": "application/vnd.rar", "7z": "application/x-7z-compressed",
-    "tar": "application/x-tar", "gz": "application/gzip", "bz2": "application/x-bzip2",
-    "xz": "application/x-xz", "zst": "application/zstd", "cab": "application/vnd.ms-cab-compressed",
+    "tar": "application/x-tar", "gz": "application/gzip", "tgz": "application/gzip",
+    "tbz2": "application/x-bzip2", "txz": "application/x-xz",
+    "bz2": "application/x-bzip2", "xz": "application/x-xz",
+    "zst": "application/zstd", "cab": "application/vnd.ms-cab-compressed",
     "jar": "application/java-archive", "iso": "application/x-iso9660-image",
     # exe / lnk
     "exe": "application/x-msdownload", "msi": "application/x-msi",
@@ -2123,8 +2238,111 @@ def _detect_bom(raw):
     return None, 0
 
 
+# 常见二进制/压缩/文档魔数（用于拦截"伪装成文本"的二进制文件）
+_BINARY_MAGICS = (
+    (b"PK\x03\x04", "zip"),          # zip / xlsx / docx / jar
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"GIF8", "gif"),
+    (b"%PDF", "pdf"),
+    (b"\x1f\x8b", "gzip"),
+    (b"\x7fELF", "elf"),
+    (b"MZ", "exe"),                    # PE（exe/dll）
+    (b"\xca\xfe\xba\xbe", "java"),
+    (b"\x00\x00\x01\x00", "ico"),
+    (b"BM", "bmp"),
+)
+
+
+def _has_binary_magic(raw):
+    """常见二进制/压缩/文档魔数判定（优先级最高：zip 等结构字节可能形似 UTF-16）。"""
+    if not raw:
+        return False
+    for magic, _ in _BINARY_MAGICS:
+        if raw.startswith(magic):
+            return True
+    # mp4/mov/3gp：偏移 4 处为 "ftyp"
+    if len(raw) >= 8 and raw[4:8] == b"ftyp":
+        return True
+    # webp：RIFF....WEBP
+    if len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+        return True
+    return False
+
+
+def _looks_binary(raw):
+    """二进制判定：魔数 + 空字节比例（>3%）双保险。
+    注意：调用方需先排除 BOM / UTF-16 文本，否则 UTF-16 的空字节会误判。"""
+    return bool(raw) and (_has_binary_magic(raw) or raw.count(b"\x00") / len(raw) > 0.03)
+
+
+def _detect_utf16_nobom(raw):
+    """无 BOM UTF-16 启发式。
+
+    返回 (编码名, 字节起点)；起点用于跳过 ASCII 前缀（混合编码文件）。
+    偶数位 \x00 多 → BE，奇数位 \x00 多 → LE。
+    兼容"ASCII 前缀 + UTF-16 主体"的混合文件（如 START 头部后接 UTF-16LE）：
+    先找 UTF-16 CRLF 线索（LE: \r\x00\n\x00 / BE: \x00\r\x00\n）确定端序与起点；
+    无线索则整体统计，起点 0。
+    """
+    n = min(len(raw), 512)
+    if n < 8:
+        return None
+    # 1) CRLF 线索优先（混合编码文件：ASCII 前缀 + UTF-16 主体）
+    for i in range(n - 3):
+        if raw[i] == 0x0D and raw[i + 1] == 0x00 and raw[i + 2] == 0x0A and raw[i + 3] == 0x00:
+            return "utf-16le", i
+            return "utf-16le", i - (i % 2)
+            return "utf-16be", i
+            return "utf-16be", i - (i % 2)
+    # 2) 无 CRLF 线索：整体奇偶统计（起点 0）
+    evens = sum(1 for i in range(0, n, 2) if raw[i] == 0)
+    odds = sum(1 for i in range(1, n, 2) if raw[i] == 0)
+    half = n / 2
+    if evens > half * 0.6:
+        return "utf-16be", 0
+    if odds > half * 0.6:
+        return "utf-16le", 0
+    return None
+
+
+def _smart_decode(raw, fallback_errors="replace"):
+    """通用字节解码：BOM → 无 BOM UTF-16 → utf-8 → gbk → gb18030 → latin-1。
+    返回 (text, encoding)。供文本预览 / 字幕 / 子进程输出等所有编码点共用（t14）。"""
+    if not raw:
+        return "", "utf-8"
+    enc_name, bom_len = _detect_bom(raw)
+    u16_start = 0
+    if not enc_name:
+        u16 = _detect_utf16_nobom(raw)
+        if u16:
+            enc_name, u16_start = u16
+    if enc_name:
+        # 跳过 BOM 或 ASCII 前缀（混合编码）后再解码
+        start = bom_len if bom_len else u16_start
+        return raw[start:].decode(enc_name, errors=fallback_errors), enc_name
+    # gbk 优先（大陆主流）；gbk 严格失败时试 big5（繁体）；gb18030 兜底（GBK 超集，全 Unicode）
+    for enc in ("utf-8", "gbk", "big5", "gb18030"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        # GBK 的 A4xx 区是日文假名，而 Big5 的 A4xx 区是常用汉字：
+        # gbk 解码出大量假名（>50%）→ 很可能是 Big5 中文被误解码，改试 big5
+        if enc == "gbk" and len(text) >= 2:
+            kana = sum(1 for ch in text if "\u30a0" <= ch <= "\u30ff")
+            if kana / len(text) > 0.5:
+                try:
+                    return raw.decode("big5"), "big5"
+                except UnicodeDecodeError:
+                    pass
+        return text, enc
+    return raw.decode("latin-1", errors=fallback_errors), "latin-1"
+
+
 def _read_text(path, limit=1024 * 1024):
-    """读取文本文件前 limit 字节；BOM 优先识别，否则 utf-8 → gbk → latin-1 逐级解码。"""
+    """读取文本文件前 limit 字节；BOM / 无 BOM UTF-16 优先，否则 utf-8 → gbk → latin-1 逐级解码。
+    伪装成 .txt/.csv/.md 的二进制文件（xlsx/zip/图片等）返回明确错误而非乱码。"""
     ext = os.path.splitext(path)[1].lstrip(".").lower()
     kind = "markdown" if ext in _MD_EXT else ("csv" if ext == "csv" else "text")
     with open(path, "rb") as fh:
@@ -2134,25 +2352,43 @@ def _read_text(path, limit=1024 * 1024):
     truncated = len(raw) > limit
     if truncated:
         raw = raw[:limit]
+    name = os.path.basename(path) or path
+    # 编码识别顺序：BOM → 二进制魔数 → 无 BOM UTF-16 → 空字节比例 → utf-8/gbk/latin-1
     enc_name, bom_len = _detect_bom(raw)
+    if not enc_name:
+        if _has_binary_magic(raw):
+            # 魔数优先：zip/xlsx/图片等，即使结构字节形似 UTF-16 也是二进制
+            return {
+                "name": name,
+                "kind": "binary",
+                "error": "该文件是二进制文件，无法文本预览",
+                "total_size": os.path.getsize(path),
+                "read_bytes": len(raw),
+            }
+        u16 = _detect_utf16_nobom(raw)
+        if u16:
+            enc_name, u16_start = u16
+            bom_len = 0
+        elif raw and raw.count(b"\x00") / len(raw) > 0.03:
+            # 非 UTF-16 文本但空字节比例高 → 二进制（如部分压缩/加密数据）
+            return {
+                "name": name,
+                "kind": "binary",
+                "error": "该文件是二进制文件，无法文本预览",
+                "total_size": os.path.getsize(path),
+                "read_bytes": len(raw),
+            }
     if enc_name:
-        # BOM 编码：UTF-16 可能被 limit 截成奇数个字节，用 replace 兜底避免抛错
-        content = raw[bom_len:].decode(enc_name, errors="replace")
+        # BOM/UTF-16 编码：可能被 limit 截成奇数个字节，用 replace 兜底避免抛错；
+        # u16_start 用于跳过 ASCII 前缀（混合编码文件：ASCII 头 + UTF-16 主体）
+        start = bom_len if bom_len else u16_start
+        content = raw[start:].decode(enc_name, errors="replace")
         encoding = enc_name
     else:
-        content, encoding = None, None
-        for enc in ("utf-8", "gbk"):
-            try:
-                content = raw.decode(enc)
-                encoding = enc
-                break
-            except UnicodeDecodeError:
-                continue
-        if content is None:  # 兜底：latin-1 永不失败，配合 replace 保证可显示
-            content = raw.decode("latin-1", errors="replace")
-            encoding = "latin-1"
+        # 无 BOM / 非 UTF-16：utf-8 → gbk → gb18030 → latin-1（gb18030 兼容繁体）
+        content, encoding = _smart_decode(raw)
     return {
-        "name": os.path.basename(path) or path,
+        "name": name,
         "kind": kind,
         "encoding": encoding,
         "content": content,
@@ -2188,16 +2424,25 @@ def _lnk_target(path):
     """
     esc = path.replace("'", "''")
     ps = (
+        # T32：强制 PowerShell 输出 UTF-8，避免中文目标路径被按 OEM/GBK 解码成乱码
+        # （实测 Windows PowerShell 5.1 管道输出为 UTF-8 字节，原 gbk 解码导致
+        #  "ai大模型api备注.txt" → "ai澶фā鍨媋pi澶囨敞.txt"，目标被误判失效）
+        "$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
         "$sh=New-Object -ComObject WScript.Shell; "
         "$s=$sh.CreateShortcut('%s'); "
         "Write-Output $s.TargetPath; "
         "Write-Output $s.WorkingDirectory; "
         "Write-Output $s.Arguments" % esc
     )
+    # powershell 可能不在 PATH（服务经 Start-Process/批处理启动时环境受限）：
+    # 先用绝对路径（Windows PowerShell 5.1 固定位置），再退回 PATH 查找。
+    ps_exe = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    if not os.path.isfile(ps_exe):
+        ps_exe = "powershell"   # 兜底：靠 PATH（部分系统可用）
     try:
         r = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", ps],
-            capture_output=True, text=True, encoding="gbk",
+            [ps_exe, "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=20,
         )
     except Exception as exc:  # noqa: BLE001
@@ -3120,8 +3365,8 @@ def _subtitle_vtt(path):
     sp = _subtitle_path(path)
     if sp:
         ext = os.path.splitext(sp)[1].lower()
-        with open(sp, "r", encoding="utf-8", errors="replace") as fh:
-            content = fh.read()
+        with open(sp, "rb") as fh:
+            content, _ = _smart_decode(fh.read())   # GBK 中文字幕不再乱码（原硬编码 utf-8）
         if ext == ".srt":
             return _srt_to_vtt(content), "sidecar"
         if ext == ".ass" or ext == ".ssa":
@@ -3137,7 +3382,8 @@ def _subtitle_vtt(path):
             capture_output=True, timeout=60,
         )
         if r.returncode == 0 and r.stdout:
-            return r.stdout.decode("utf-8", "replace"), "embedded"
+            content, _ = _smart_decode(r.stdout)   # GBK 内嵌字幕兜底
+            return content, "embedded"
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -3348,24 +3594,297 @@ def _save_shares() -> None:
 _load_shares()
 
 
-def _unpack_list(path):
-    """压缩包条目列表（功能 4）。仅支持 zip（zipfile），其它格式返回 unsupported。"""
-    ext = os.path.splitext(path)[1].lstrip(".").lower()
+def _fix_zip_name(name):
+    """修复 ZIP 条目名的编码：无 UTF-8 标志的 GBK 中文名被 zipfile 按 cp437 解码成乱码。
+
+    安全策略：仅当 cp437→gbk 重解码成功、结果含 >=2 个中文/全角字符且无控制字符时采用；
+    ASCII 名 / UTF-8 标志名 / 拉丁文名保持不动（cp437→gbk 会失败或不含中文）。"""
+    if not name:
+        return name
+    try:
+        fixed = name.encode("cp437").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+    if fixed == name or not fixed:
+        return name
+    if any(ord(c) < 32 for c in fixed):          # 控制字符 → 解码结果不健康，放弃
+        return name
+    cjk = sum(1 for c in fixed
+              if "\u4e00" <= c <= "\u9fff" or "\u3000" <= c <= "\u303f" or "\uff00" <= c <= "\uffef")
+    if cjk >= 2:                              # 含 >=2 个中文/全角字符即采用（路径前缀不拉低判定）
+        return fixed
+    return name
+
+
+def _archive_fmt(path):
+    """识别压缩包格式：zip / tar / 7z / rar / unsupported（支持 tar.gz 等复合扩展名）。
+
+    gz/bz2/xz 可能是 tar 压缩（tar.gz 改名而来）也可能是单文件压缩，
+    统一归 "tar" 交给 tarfile 尝试，失败时给出明确提示。
+    """
+    low = os.path.basename(path).lower()
+    if low.endswith((".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")):
+        return "tar"
+    ext = os.path.splitext(low)[1].lstrip(".")
     if ext == "zip":
+        return "zip"
+    if ext in ("tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz"):
+        return "tar"
+    if ext == "7z":
+        return "7z"
+    if ext == "rar":
+        return "rar"
+    return "unsupported"
+
+
+def _fix_tar_name(name):
+    """修复 tar 条目名的编码：GBK 中文名（Windows 打包工具常见）被 tarfile
+    按 UTF-8 解码成含代理字符的乱码。
+
+    安全策略：仅当名中含代理字符（说明 UTF-8 解码失败过）且 GBK 重解码后
+    含 >=1 个中文/全角字符且无控制字符时采用；合法 UTF-8 名保持不动。
+    """
+    if not name:
+        return name
+    if not any(0xDC80 <= ord(c) <= 0xDCFF for c in name):
+        return name
+    try:
+        raw = name.encode("utf-8", "surrogateescape")
+        fixed = raw.decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return name
+    if any(ord(c) < 32 for c in fixed):
+        return name
+    cjk = sum(1 for c in fixed
+              if "\u4e00" <= c <= "\u9fff" or "\u3000" <= c <= "\u303f" or "\uff00" <= c <= "\uffef")
+    return fixed if cjk >= 1 else name
+
+
+# ============ rar/7z 外部工具探测（依赖最小化约束） ============
+# 原则：绝不新增 pip/npm 依赖、不下载二进制——rar/7z 支持完全依赖"系统已有的
+# 7-Zip 或 WinRAR"，探测到才启用，未探测到则返回明确提示（引导安装 7-Zip）。
+# 下方两个常量列表是"用户可编辑的探测路径"，可在此追加自定义安装位置
+# （例如 D:\Tools\7-Zip\7z.exe）；此外还会自动探测 %ProgramFiles% 系列
+# 环境变量根目录与 PATH。
+_SEVEN_7Z_PATHS = [
+    r"C:\Program Files\7-Zip\7z.exe",
+    r"C:\Program Files (x86)\7-Zip\7z.exe",
+    r"C:\Program Files\7-Zip\7zz.exe",
+]
+_WINRAR_PATHS = [
+    r"C:\Program Files\WinRAR\WinRAR.exe",
+    r"C:\Program Files\WinRAR\UnRAR.exe",
+    r"C:\Program Files\WinRAR\Rar.exe",
+    r"C:\Program Files (x86)\WinRAR\WinRAR.exe",
+    r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
+]
+
+
+def _find_tool(paths, names):
+    """探测外部工具：先查常量列表（用户可扩展），再查 %ProgramFiles% 系列
+    环境变量根目录，最后用 shutil.which 走 PATH。"""
+    roots = set()
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+        v = os.environ.get(var)
+        if v:
+            roots.add(v)
+    for p in paths:
+        if os.path.isfile(p):
+            return p
+    for root in roots:
+        for n in names:
+            cand = os.path.join(root, n)
+            if os.path.isfile(cand):
+                return cand
+    for n in names:
+        hit = shutil.which(n)
+        if hit:
+            return hit
+    return None
+
+
+def _find_7z():
+    return _find_tool(_SEVEN_7Z_PATHS, ("7z.exe", "7zz.exe"))
+
+
+def _find_winrar():
+    return _find_tool(_WINRAR_PATHS, ("WinRAR.exe", "UnRAR.exe", "Rar.exe"))
+
+
+def _decode_cmd(data):
+    """命令输出解码：优先 UTF-8（7z -sccUTF-8），失败回退 GBK（WinRAR 中文系统 ANSI）。"""
+    for enc in ("utf-8", "gbk"):
         try:
-            with zipfile.ZipFile(path) as zf:
-                entries = [
-                    {
-                        "name": info.filename,
-                        "path_in_archive": info.filename,
-                        "size": info.file_size,
-                        "is_dir": info.filename.endswith("/"),
-                    }
-                    for info in zf.infolist()
-                ]
-            return {"format": "zip", "entries": entries}
-        except (zipfile.BadZipFile, OSError) as exc:
-            return {"format": "zip", "entries": [], "error": str(exc)}
+            return data.decode(enc)
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            continue
+    return data.decode("utf-8", "replace")
+
+
+def _hier_level(raw, prefix, fmt):
+    """把扁平条目列表按 prefix 归并为该层的一级子条目（层级浏览核心）。
+
+    prefix 为包内目录路径（正斜杠、无首尾斜杠），"" 表示根层。
+    隐含目录（只有文件、无显式目录项）由文件路径推断；
+    返回 {format, dir, entries, total}，total = 该层（含嵌套）条目总数。
+    """
+    prefix = (prefix or "").replace("\\", "/").strip("/")
+    p = prefix + "/" if prefix else ""
+    direct = {}
+    total = 0
+    for e in raw:
+        nm = (e.get("path_in_archive") or "").replace("\\", "/").lstrip("./")
+        if p and not nm.startswith(p):
+            continue
+        rest = nm[len(p):]
+        if not rest:
+            continue
+        total += 1
+        seg, _, tail = rest.partition("/")
+        seg = seg.rstrip("/")
+        if not seg:
+            continue
+        if tail:
+            if seg not in direct:            # 更深层条目 → 隐含目录
+                direct[seg] = {"name": seg, "path_in_archive": p + seg,
+                               "size": None, "is_dir": True}
+        elif seg not in direct:              # 一层内条目（显式目录或文件）
+            direct[seg] = {"name": seg, "path_in_archive": p + seg,
+                           "size": None if e.get("is_dir") else e.get("size"),
+                           "is_dir": e.get("is_dir", False)}
+    entries = sorted(direct.values(), key=lambda x: (not x["is_dir"], x["name"].lower()))
+    return {"format": fmt, "dir": prefix, "entries": entries, "total": total}
+
+
+def _unpack_zip(path, dir=""):
+    try:
+        with zipfile.ZipFile(path) as zf:
+            raw = []
+            for info in zf.infolist():
+                nm = _fix_zip_name(info.filename)          # GBK 中文名修复
+                raw.append({"name": nm, "path_in_archive": nm,
+                            "size": info.file_size,
+                            "is_dir": info.filename.endswith("/")})
+            return _hier_level(raw, dir, "zip")
+    except (zipfile.BadZipFile, OSError) as exc:
+        return {"format": "zip", "entries": [], "error": str(exc)}
+
+
+def _unpack_tar(path, dir=""):
+    try:
+        with tarfile.open(path, "r:*") as tf:              # 自动识别 gz/bz2/xz
+            raw = []
+            for m in tf.getmembers():
+                nm = _fix_tar_name(m.name).replace("\\", "/").lstrip("./")
+                is_dir = m.isdir() or nm.endswith("/")
+                raw.append({"name": nm, "path_in_archive": nm,
+                            "size": None if is_dir else m.size,
+                            "is_dir": is_dir})
+            return _hier_level(raw, dir, "tar")
+    except (tarfile.TarError, EOFError, OSError) as exc:
+        ext = os.path.splitext(path)[1].lstrip(".").lower()
+        if ext in ("gz", "bz2", "xz"):
+            msg = ("该文件是单文件压缩（非 tar 归档，内部无目录结构），"
+                   "无法浏览，请直接下载原文件")
+        else:
+            msg = "无法读取该 tar 压缩包: %s" % exc
+        return {"format": "tar", "entries": [], "error": msg}
+
+
+def _seven_entry(fields):
+    """把 7z l -slt 的一条记录解析为条目（7z 的 rar 列表同样适用）。"""
+    p = (fields.get("Path") or "").replace("\\", "/").lstrip("./")
+    if not p:
+        return None
+    is_dir = fields.get("Folder") == "+" or p.endswith("/") or \
+             fields.get("Attributes", "").startswith("D")
+    size = None
+    try:
+        size = int(fields.get("Size") or 0)
+    except (TypeError, ValueError):
+        size = None
+    return {"name": p, "path_in_archive": p,
+            "size": None if is_dir else size, "is_dir": is_dir}
+
+
+def _seven_list(tool, path):
+    """7z l -slt -ba 技术列表：返回 (raw_entries, error)。"""
+    try:
+        r = subprocess.run([tool, "l", "-slt", "-ba", "-sccUTF-8", path],
+                           capture_output=True, timeout=300)
+    except Exception as exc:  # noqa: BLE001
+        return None, "7-Zip 执行失败: %s" % exc
+    if r.returncode != 0:
+        msg = (_decode_cmd(r.stderr) or r.stderr.decode("utf-8", "replace")).strip()
+        return None, "7-Zip 无法读取该压缩包: %s" % (msg or "未知错误")
+    raw = []
+    cur = {}
+    for line in _decode_cmd(r.stdout).splitlines():
+        line = line.rstrip("\r")
+        if not line.strip():
+            en = _seven_entry(cur)
+            if en:
+                raw.append(en)
+            cur = {}
+            continue
+        if " = " in line:
+            k, v = line.split(" = ", 1)
+            cur[k.strip()] = v.strip()
+    en = _seven_entry(cur)
+    if en:
+        raw.append(en)
+    return raw, None
+
+
+def _unpack_winrar(tool, path, dir="", fmt="rar"):
+    """WinRAR 备选路径（无 7-Zip 时）：UnRAR/WinRAR lb 裸列表，尽力而为。"""
+    try:
+        r = subprocess.run([tool, "lb", "-p-", path],
+                           capture_output=True, timeout=300)
+    except Exception as exc:  # noqa: BLE001
+        return {"format": fmt, "entries": [], "error": "WinRAR 执行失败: %s" % exc}
+    if r.returncode != 0:
+        return {"format": fmt, "entries": [], "error": "WinRAR 无法读取该压缩包"}
+    raw = []
+    for ln in _decode_cmd(r.stdout).splitlines():
+        ln = ln.strip().replace("\\", "/").lstrip("./")
+        if not ln:
+            continue
+        is_dir = ln.endswith("/")
+        raw.append({"name": ln, "path_in_archive": ln,
+                    "size": None if is_dir else 0, "is_dir": is_dir})
+    return _hier_level(raw, dir, fmt)
+
+
+def _unpack_seven(path, dir="", fmt="7z"):
+    """rar/7z 预览：优先 7-Zip（同时支持两种格式），其次 WinRAR；都没有时给明确提示。"""
+    tool = _find_7z()
+    if tool:
+        raw, err = _seven_list(tool, path)
+        if err:
+            return {"format": fmt, "entries": [], "error": err}
+        return _hier_level(raw, dir, fmt)
+    tool = _find_winrar()
+    if tool:
+        return _unpack_winrar(tool, path, dir, fmt)
+    return {"format": fmt, "entries": [],
+            "error": ("无法预览 %s 压缩包：未找到 7-Zip 或 WinRAR。"
+                      "请安装 7-Zip（https://www.7-zip.org/）后重试。") % fmt.upper()}
+
+
+def _unpack_list(path, dir=""):
+    """压缩包条目列表（层级浏览）：dir 为包内目录前缀，返回该层直接子条目。
+
+    支持 zip（zipfile）/ tar、tgz、tar.gz、tar.bz2 等（tarfile）/
+    rar、7z（探测系统 7-Zip 或 WinRAR，未找到返回明确提示）。
+    """
+    fmt = _archive_fmt(path)
+    if fmt == "zip":
+        return _unpack_zip(path, dir)
+    if fmt == "tar":
+        return _unpack_tar(path, dir)
+    if fmt in ("7z", "rar"):
+        return _unpack_seven(path, dir, fmt)
     return {"format": "unsupported", "entries": []}
 
 
@@ -3380,27 +3899,199 @@ def _range_unsatisfiable(handler, fsize):
 # 视频 Range 流式输出已统一进 _send_file_range（见类内方法），此处不再单独实现
 
 
-def _unpack_download(handler, archive, entry):
-    """下载压缩包内的单个条目（功能 4）。仅支持 zip（zipfile 流式）。"""
-    ext = os.path.splitext(archive)[1].lstrip(".").lower()
-    disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(entry) or "file")
-    if ext == "zip":
+def _seven_entry_size(tool, archive, entry):
+    """7z l -slt 查单条目大小与目录标记（供下载时设置 Content-Length）。"""
+    try:
+        r = subprocess.run([tool, "l", "-slt", "-ba", "-sccUTF-8", archive],
+                           capture_output=True, timeout=300)
+    except Exception:  # noqa: BLE001
+        return None, None
+    if r.returncode != 0:
+        return None, None
+    cur = {}
+    for line in _decode_cmd(r.stdout).splitlines():
+        line = line.rstrip("\r")
+        if not line.strip():
+            p = cur.get("Path", "")
+            if p and (p == entry or p.replace("\\", "/") == entry):
+                is_dir = cur.get("Folder") == "+" or p.endswith("/") or \
+                         cur.get("Attributes", "").startswith("D")
+                try:
+                    return int(cur.get("Size") or 0), is_dir
+                except ValueError:
+                    return None, is_dir
+            cur = {}
+            continue
+        if " = " in line:
+            k, v = line.split(" = ", 1)
+            cur[k.strip()] = v.strip()
+    p = cur.get("Path", "")
+    if p and (p == entry or p.replace("\\", "/") == entry):
+        is_dir = cur.get("Folder") == "+" or p.endswith("/") or \
+                 cur.get("Attributes", "").startswith("D")
         try:
-            with zipfile.ZipFile(archive) as zf:
-                if entry not in zf.namelist():
-                    handler._send_json({"error": "压缩包内没有该条目"}, 403)
-                    return
-                info = zf.getinfo(entry)
-                handler.send_response(200)
-                handler.send_header("Content-Type", "application/octet-stream")
-                handler.send_header("Content-Length", str(info.file_size))
-                handler.send_header("Content-Disposition", disp)
-                handler.send_header("Cache-Control", "no-store")
-                handler.end_headers()
-                with zf.open(entry) as src:
-                    shutil.copyfileobj(src, handler.wfile)
-        except Exception as exc:  # noqa: BLE001
-            handler._send_error_page("解压失败", str(exc))
+            return int(cur.get("Size") or 0), is_dir
+        except ValueError:
+            return None, is_dir
+    return None, None
+
+
+def _dl_zip(handler, archive, entry, disp):
+    """zip 条目下载（zipfile 流式，保持原有逻辑）。"""
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            # 前端传的 entry 是修复后的名：先精确匹配，再经 _fix_zip_name 映射回原始名
+            real = entry if entry in zf.namelist() else None
+            if real is None:
+                for orig in zf.namelist():
+                    if _fix_zip_name(orig) == entry:
+                        real = orig
+                        break
+            if real is None:
+                handler._send_json({"error": "压缩包内没有该条目"}, 403)
+                return
+            info = zf.getinfo(real)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/octet-stream")
+            handler.send_header("Content-Length", str(info.file_size))
+            handler.send_header("Content-Disposition", disp)   # disp 用修复后的名（用户可见）
+            handler.send_header("Cache-Control", "no-store")
+            handler.end_headers()
+            with zf.open(real) as src:
+                shutil.copyfileobj(src, handler.wfile)
+    except Exception as exc:  # noqa: BLE001
+        handler._send_error_page("解压失败", str(exc))
+
+
+def _dl_tar(handler, archive, entry, disp):
+    """tar/tgz/tar.gz/tar.bz2 条目下载（tarfile 流式）。"""
+    try:
+        with tarfile.open(archive, "r:*") as tf:
+            member = None
+            want = entry.replace("\\", "/").lstrip("./")
+            for m in tf.getmembers():
+                nm = _fix_tar_name(m.name).replace("\\", "/").lstrip("./")
+                if nm == want:
+                    member = m
+                    break
+            if member is None or member.isdir():
+                handler._send_json({"error": "压缩包内没有该条目"}, 403)
+                return
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/octet-stream")
+            handler.send_header("Content-Length", str(member.size))
+            handler.send_header("Content-Disposition", disp)
+            handler.send_header("Cache-Control", "no-store")
+            handler.end_headers()
+            src = tf.extractfile(member)
+            if src:
+                shutil.copyfileobj(src, handler.wfile)
+    except Exception as exc:  # noqa: BLE001
+        handler._send_error_page("解压失败", str(exc))
+
+
+def _dl_7z(handler, archive, entry, disp, tool):
+    """7-Zip 条目下载：先查 size 设置 Content-Length，再 7z e -so 流式输出。"""
+    size, is_dir = _seven_entry_size(tool, archive, entry)
+    if is_dir:
+        handler._send_json({"error": "目录不能直接下载，请进入后选择文件"}, 403)
+        return
+    try:
+        proc = subprocess.Popen(
+            [tool, "e", "-so", "-y", "-sccUTF-8", archive, entry],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except Exception as exc:  # noqa: BLE001
+        handler._send_error_page("解压失败", str(exc))
+        return
+    if size is not None:
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Length", str(size))
+        handler.send_header("Content-Disposition", disp)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+    else:
+        # 大小未知：close-delimited 传输（需显式 Connection: close 结束响应）
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Disposition", disp)
+        handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Connection", "close")
+        handler.end_headers()
+    try:
+        while True:
+            chunk = proc.stdout.read(1 << 20)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
+    finally:
+        try:
+            proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.stderr.read()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            proc.kill()
+
+
+def _dl_winrar(handler, archive, entry, disp, tool):
+    """WinRAR 备选下载：WinRAR/UnRAR 不支持输出到 stdout，解压到临时目录后流式发送。"""
+    tmp = tempfile.mkdtemp(prefix="tk_unpack_")
+    try:
+        r = subprocess.run([tool, "e", "-p-", "-y", "-o+", archive, entry, tmp],
+                           capture_output=True, timeout=300)
+        if r.returncode != 0:
+            handler._send_error_page(
+                "解压失败", "WinRAR 解压条目失败: %s" % _decode_cmd(r.stderr).strip())
+            return
+        extracted = None
+        for f in os.listdir(tmp):
+            fp = os.path.join(tmp, f)
+            if os.path.isfile(fp):
+                extracted = fp
+                break
+        if extracted is None:
+            handler._send_json({"error": "压缩包内没有该条目"}, 403)
+            return
+        fsize = os.path.getsize(extracted)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "application/octet-stream")
+        handler.send_header("Content-Length", str(fsize))
+        handler.send_header("Content-Disposition", disp)
+        handler.send_header("Cache-Control", "no-store")
+        handler.end_headers()
+        with open(extracted, "rb") as fh:
+            shutil.copyfileobj(fh, handler.wfile)
+    except Exception as exc:  # noqa: BLE001
+        handler._send_error_page("解压失败", str(exc))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _unpack_download(handler, archive, entry):
+    """下载压缩包内的单个条目：zip/tar 标准库流式；rar/7z 走 7-Zip/WinRAR。"""
+    fmt = _archive_fmt(archive)
+    disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(entry) or "file")
+    if fmt == "zip":
+        _dl_zip(handler, archive, entry, disp)
+    elif fmt == "tar":
+        _dl_tar(handler, archive, entry, disp)
+    elif fmt in ("7z", "rar"):
+        tool = _find_7z()
+        if tool:
+            _dl_7z(handler, archive, entry, disp, tool)
+            return
+        tool = _find_winrar()
+        if tool:
+            _dl_winrar(handler, archive, entry, disp, tool)
+            return
+        handler._send_error_page("解压失败",
+                                 "未找到 7-Zip 或 WinRAR，无法解压该压缩包")
     else:
         handler._send_error_page("解压失败", "不支持的压缩包格式")
 

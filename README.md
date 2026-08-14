@@ -27,7 +27,7 @@
 | `ffprobe.exe`（`C:\Users\user\ffmpeg\bin\ffprobe.exe`，`server.py:72`） | 视频元数据提取（tag/时长/分辨率/码率） | 可选（缺失静默降级 `details=null`） |
 | `ffmpeg.exe`（与 ffprobe 同目录，`server.py:74`） | 视频缩略图、MSE 转码/remux、内嵌字幕提取、缩略图条、单帧预览 | 可选（缺失时对应接口 404/500） |
 | 无（纯 Python `zipfile`） | 打包下载输出 `.zip`：同步 `/dlzip`（`_stream_archive` `server.py:3586`）+ 打包中心后台任务（`_archive_new_task` `server.py:3710`，分块写入 `_write_entry_chunked` `server.py:3508`） | 内置，零外部依赖 |
-| 无（纯 Python `zipfile`） | zip 包在线解压列表/单条目下载（`server.py:3212/3243`） | 内置，零外部依赖 |
+| 无（纯 Python `zipfile`/`tarfile` 标准库） | 压缩包在线解压（T25）：zip/rar/7z/tar/tgz/tar.gz/tar.bz2 列表 + 层级目录浏览（`api/unpack`/`api/unpackdir`）+ 单条目下载（`api/unpackdl`） | zip/tar 族内置零外部依赖；rar/7z 需系统已装 7-Zip 或 WinRAR（探测到才启用，未探测到返回明确提示，不新增任何 pip/npm 依赖） |
 | `faster_whisper`（pip 可选安装） | 视频语音识别生成字幕（`/api/asr`） | 可选（未安装接口返回 501） |
 | Bootstrap / highlight.js / 文件类型图标 SVG | 前端离线静态资源（`static/` 目录） | 必需（随项目分发，白名单提供） |
 | `cjk-normalize.js` | 简繁/日式新字体字符级归一化映射表（`static/cjk-normalize.js`，约 28KB，纯前端无运行时依赖） | 必需（随项目分发，已在静态白名单） |

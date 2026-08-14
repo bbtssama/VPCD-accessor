@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>预览</title>
+<link rel="stylesheet" href="static/bootstrap.min.css">
+<link rel="stylesheet" href="static/highlight.min.css">
+<style>
+  /* T18 方案B：独立预览页（深色沉浸式；与弹窗 preview 共享同一套 app.js 渲染辅助） */
+  html, body { height: 100%; margin: 0; background: #0b0f17; color: #d1d5db; }
+  body { display: flex; flex-direction: column; font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif; }
+  .view-top {
+    flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+    background: rgba(255,255,255,.05);
+    border-bottom: 1px solid rgba(255,255,255,.1);
+  }
+  .view-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+  .view-btn {
+    background: rgba(255,255,255,.12); border: none; color: #fff;
+    border-radius: 8px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+    text-decoration: none; display: inline-flex; align-items: center; gap: 5px;
+    transition: background-color .15s ease;
+  }
+  .view-btn:hover { background: rgba(255,255,255,.22); color: #fff; }
+  #viewBody {
+    flex: 1; min-height: 0; overflow: auto;
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px;
+  }
+  /* 视频：大屏 contain */
+  #viewBody .view-video { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  #viewBody video { max-width: 100%; max-height: 100%; background: #000; border-radius: 8px; }
+  /* 图片：大屏 contain + 滚轮缩放 */
+  #viewBody .view-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; transition: transform .1s ease; }
+  /* 文本/代码：全屏滚动 + 大字号 */
+  #viewBody .view-text { width: 100%; max-width: 1080px; margin: 0 auto; }
+  #viewBody .text-pre, #viewBody .md-code { max-height: none; font-size: 14.5px; background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.1); }
+  #viewBody .md-code code { color: #e5e7eb; }
+  /* Markdown 深色适配 */
+  #viewBody .md-h, #viewBody .md-p { color: #e5e7eb; }
+  #viewBody .md-quote { background: rgba(59,130,246,.1); }
+  #viewBody .md-table th { background: rgba(255,255,255,.08); }
+  #viewBody .md-table, #viewBody .detail-tbl { color: #d1d5db; }
+  #viewBody .detail-tbl td { border-color: rgba(255,255,255,.12); }
+  #viewBody .mdl-note { color: #9ca3af; }
+  #viewBody .muted { color: #9ca3af; }
+  /* 自定义滚动条（与主站全局一致） */
+  * { scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.25) transparent; }
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { background: rgba(255,255,255,.25); border-radius: 3px; }
+  *::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.4); }
+  /* 解压列表 / CSV 表格 */
+  #viewBody .unpack-list { max-height: none; border-color: rgba(255,255,255,.15); background: rgba(255,255,255,.03); }
+  #viewBody .unpack-row { border-color: rgba(255,255,255,.08); color: #d1d5db; }
+  #viewBody .unpack-row:not(.dir):hover { background: rgba(255,255,255,.07); }
+  #viewBody .table { color: #d1d5db; }
+  #viewBody .table-bordered > :not(caption) > * > * { border-color: rgba(255,255,255,.15); }
+  #viewBody .table-striped > tbody > tr:nth-of-type(odd) > * { color: #d1d5db; }
+</style>
+</head>
+<body>
+
+<div class="view-top">
+  <span class="view-title" id="viewTitle">预览</span>
+  <span id="viewDl"></span>
+  <button class="view-btn" id="viewMaskBtn" type="button">显示明文</button>
+  <a class="view-btn" id="viewClose" href="javascript:window.close()">✕ 关闭</a>
+</div>
+<div id="viewBody"></div>
+
+<!-- 占位 DOM：让 app.js 顶层 Modal 初始化与事件绑定不因缺元素中断（独立页不展示这些，仅保证脚本完整执行） -->
+<div style="display:none" id="__shadow">
+  <div id="appModal"><div class="modal-dialog"><div class="modal-content"><div class="modal-header"><h5 id="appModalTitle"></h5></div><div class="modal-body" id="appModalBody"></div></div></div></div>
+  <button id="uploadBtn"></button><input id="fileInput">
+  <button id="refreshBtn"></button><button id="viewBtn"></button>
+  <button id="navBack"></button><button id="navFwd"></button>
+  <button id="pinFab"></button><button id="pinPanelClose"></button>
+  <button id="pinShareAllBtn"></button><button id="pinPackBtn"></button><button id="pinClearBtn"></button>
+  <button id="bulkSelectAll"></button><button id="bulkPin"></button><button id="bulkUnpin"></button>
+  <button id="bulkShare"></button><button id="bulkDownload"></button><button id="bulkPack"></button><button id="bulkCancel"></button>
+  <div id="packPanel"><div id="packPanelHead"></div><div id="packTasks"></div><div id="packNewTask"><div id="packModeGroup"></div></div></div>
+  <div id="packMiniBar"></div><div id="packSubmitBtn"></div><div id="packPanelClose"></div>
+  <div id="packTotalBar"></div><div id="packDone"></div><div id="packSummary"></div><div id="packPreviewTree"></div>
+  <div id="sidebarMask"></div><div id="sidebar"></div>
+  <button id="sidebarClose"></button><button id="viewListBtn"></button><button id="viewGridBtn"></button>
+  <button id="iconLineBtn"></button><button id="iconColorBtn"></button>
+  <input id="searchInput"><input id="searchMetaToggle"><input id="extInput"><select id="sortSelect"></select>
+  <div id="typeFilters"></div><button id="tagRefresh"></button><button id="resetFilterBtn"></button>
+  <div id="toast"></div><div id="alert"></div>
+  <div id="fileRows"></div><div id="breadcrumb"></div><div id="driveTabs"></div>
+  <div id="pinnedList"></div><div id="pinnedHead"></div><div id="fuzzyHint"></div>
+  <div id="pinPanel"><div id="pinPanelTitle"></div><div id="pinPanelBody"></div></div>
+  <div id="pinFabBadge"></div><div id="pinCount"></div>
+</div>
+
+<script src="static/bootstrap.bundle.min.js"></script>
+<script src="static/highlight.min.js"></script>
+<script src="static/cjk-normalize.js"></script>
+<script src="static/app.js"></script>
+<script>
+// T18 方案B：独立预览页初始化——从 URL 读 path，复用 renderPreview 渲染（与弹窗共用渲染辅助）
+(function () {
+  var q = new URLSearchParams(location.search);
+  var p = q.get("path") || "";
+  var nm = q.get("name") || String(p).split(/[\\\/]/).pop() || "预览";
+  document.getElementById("viewTitle").textContent = nm;
+  if (!p) { document.getElementById("viewBody").innerHTML = '<p class="muted">缺少 path 参数</p>'; return; }
+  // 下载按钮
+  var dl = document.getElementById("viewDl");
+  var a = document.createElement("a");
+  a.className = "view-btn";
+  a.href = dlUrl(p);
+  a.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 4v12"/><path d="M8 12l4 4 4-4"/><path d="M4 20h16"/></svg> 下载';
+  dl.appendChild(a);
+  // 渲染（kind 由 URL 或 fileKind 推断）
+  var kind = q.get("kind") || fileKind(p);
+  var bodyEl = document.getElementById("viewBody");
+  var maskBtn = document.getElementById("viewMaskBtn");
+  function paint() {
+    bodyEl.innerHTML = "";
+    renderPreview(kind, p, nm, bodyEl);
+    maskBtn.textContent = previewMask ? "显示明文" : "隐藏敏感信息";
+  }
+  maskBtn.onclick = function () { previewMask = !previewMask; paint(); };
+  paint();
+})();
+</script>
+</body>
+</html>

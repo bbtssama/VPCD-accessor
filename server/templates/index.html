@@ -9,16 +9,16 @@
 <link rel="stylesheet" href="static/highlight.min.css">
 <style>
   /* ========== 品牌色变量层 ==========
-     克制基调：#2563eb 蓝（primary）+ #f3f4f6 灰（页面底）。
+     克制基调：#60a5fa 柔和浅蓝（primary）+ #f3f4f6 灰（页面底），与收藏面板头部观感一致。
      组件颜色一律由 --brand-* 派生为 Bootstrap 语义变量（--bs-*），
      按钮 / badge / progress / text-muted / 边框因此整体统一；
      浅色 / 深色模式只翻变量层，组件样式零改动。 */
   :root {
     /* 品牌基础色（primary/success/info/warning/danger + subtle/emphasis 变体） */
-    --brand-primary: #2563eb;
-    --brand-primary-rgb: 37, 99, 235;
+    --brand-primary: #3b82f6;
+    --brand-primary-rgb: 59, 130, 246;
     --brand-primary-subtle: #dbeafe;
-    --brand-primary-emphasis: #1e40af;
+    --brand-primary-emphasis: #2563eb;
     --brand-success: #16a34a;
     --brand-success-rgb: 22, 163, 74;
     --brand-success-subtle: #dcfce7;
@@ -38,7 +38,7 @@
     /* 中性面：页面底 / 面板面 / 边框 / 正文 / 弱化文字 */
     --brand-bg: #f3f4f6;
     --brand-surface: #ffffff;
-    --brand-border: #e5e7eb;
+    --brand-border: #d1d5db;
     --brand-text: #111827;
     --brand-text-muted: #6b7280;
     /* Bootstrap 语义映射 */
@@ -84,8 +84,8 @@
   /* 深色模式：prefers-color-scheme 整层翻转（组件全部走 --bs-*，无需单独适配） */
   @media (prefers-color-scheme: dark) {
     :root {
-      --brand-primary: #3b82f6;               /* 深底上提亮一档保证对比度 */
-      --brand-primary-rgb: 59, 130, 246;
+      --brand-primary: #93c5fd;               /* 深底上提亮（柔和浅蓝更深底可读） */
+      --brand-primary-rgb: 147, 197, 253;
       --brand-primary-subtle: #1e3a8a;
       --brand-primary-emphasis: #93c5fd;
       --brand-success: #22c55e;
@@ -161,7 +161,9 @@
   /* 键盘焦点统一高亮（:focus-visible 仅键盘导航时出现，鼠标点击不显示） */
   :focus-visible { outline: 2px solid var(--bs-primary); outline-offset: 2px; }
   /* 列表行 hover 反馈（桌面光标；触屏走点按反馈，无 sticky hover） */
-  .list-group-item { transition: background-color .15s ease, color .15s ease; }
+  .list-group-item { transition: background-color .15s ease, color .15s ease;
+                     border-bottom: 1px solid var(--bs-border-color); }   /* 行间细分隔，轮廓清晰 */
+  #fileRows .list-group-item:last-child { border-bottom: none; }
   @media (hover: hover) {
     .list-group-item:hover { background: var(--bs-tertiary-bg); }
   }
@@ -177,6 +179,27 @@
   @media (hover: hover) { #breadcrumb .seg:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); } }
   #breadcrumb .sep { color: var(--bs-border-color); margin: 0 1px; }
   #breadcrumb .cur { color: var(--bs-body-color); font-weight: 600; padding: 3px 8px; white-space: nowrap; }
+  /* T38 P3-2：盘符段加色（Windows 路径风格；.cur 已在 7) 加深为 primary） */
+  #breadcrumb .seg.drive { color: var(--bs-primary); font-weight: 600; }
+  /* T31 前进/后退：柔和圆润图标按钮（Material 风格，约 34px；浅蓝主题） */
+  .nav-icon-btn {
+    width: 34px; height: 34px;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: none; border-radius: 50%;
+    background: transparent; color: var(--bs-secondary-color);
+    cursor: pointer; padding: 0; flex-shrink: 0;
+    transition: background-color .18s ease, color .18s ease, transform .12s ease;
+  }
+  @media (hover: hover) {
+    .nav-icon-btn:hover:not(:disabled) { background: var(--bs-primary-bg-subtle); color: var(--bs-primary); }
+    .nav-icon-btn:active:not(:disabled) { transform: scale(.92); }
+  }
+  .nav-icon-btn:focus-visible { outline: 2px solid var(--bs-primary); outline-offset: 2px; }
+  .nav-icon-btn:disabled { color: var(--bs-secondary-color); opacity: .38; cursor: default; }
+  /* 移动端：触控目标 ≥44px（与同排刷新/筛选按钮对齐） */
+  @media (max-width: 575.98px) {
+    .nav-icon-btn { width: 44px; height: 44px; }
+  }
   /* 置顶卡头部：标题可截断，按钮不挤压（修复窄屏 58px 横向溢出根因）；
      圆角让键盘焦点环（:focus-visible）更美观 */
   #pinnedHead { flex-shrink: 1; min-width: 0; border-radius: 6px; }
@@ -194,6 +217,33 @@
                box-shadow: 0 4px 14px rgba(17,24,39,.18); }
   .app-toast.show { opacity: 1; }
   .empty { text-align: center; color: var(--bs-secondary-color); padding: 40px 0; }
+  /* T24 无权限目录：不可访问视觉（灰化图标 + 弱化文字 + 禁入光标 + 虚线边框） */
+  .list-group-item.denied .ic img, .list-group-item.denied .ic svg,
+  .grid-item.denied .grid-cover, .grid-item.denied .grid-cover.ic-inline { filter: grayscale(1) opacity(.55); }
+  .list-group-item.denied .nm, .grid-item.denied .grid-name { color: var(--bs-secondary-color); }
+  .grid-item.denied { border-style: dashed; }
+  .list-group-item.denied, .grid-item.denied { cursor: not-allowed; }
+  /* denied 目录图标右上角小锁（更直观的无权限标记） */
+  .ic-wrap { position: relative; display: inline-flex; }
+  .deny-lock {
+    position: absolute; right: -7px; top: -5px;
+    background: var(--brand-surface); border-radius: 50%;
+    color: var(--bs-secondary-color);
+    box-shadow: 0 0 0 1px var(--bs-border-color);
+    line-height: 0; padding: 1px;
+  }
+  .deny-lock svg { display: block; }
+  /* T24 拦截动效：行/卡片 shake 抖动 ~300ms（颜色走 --bs-* 变量，深色下自动适配） */
+  @keyframes denyShake {
+    0%, 100% { transform: translateX(0); }
+    15% { transform: translateX(-7px); }
+    30% { transform: translateX(6px); }
+    45% { transform: translateX(-4px); }
+    60% { transform: translateX(3px); }
+    75% { transform: translateX(-2px); }
+  }
+  .deny-shake { animation: denyShake .3s ease; }
+  @media (prefers-reduced-motion: reduce) { .deny-shake { animation: none; } }
   /* 置顶列表行分隔 */
   .prow + .prow { border-top: 1px dashed var(--bs-border-color); }
   /* 星标 */
@@ -224,6 +274,16 @@
               border-radius: 8px; padding: 10px; overflow: auto; max-height: 60vh; }
   /* 预览加载态（可取消）：转圈 + 提示 + 取消按钮 */
   .ld-box { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; }
+  /* T38 P3-8：PDF 兜底提示块（边框+浅底+图标，醒目但不刺眼；深浅色走 --bs-* 变量） */
+  .pdf-fallback {
+    display: flex; align-items: center; gap: 8px;
+    border: 1px dashed var(--bs-warning-border-subtle);
+    background: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px;
+  }
+  .pdf-fallback .pdf-fb-ic { color: var(--bs-warning); display: inline-flex; }
+  .pdf-fallback a { color: var(--bs-primary); font-weight: 600; text-underline-offset: 2px; }
   /* 大文本分片渲染进度提示 */
   .render-tip { color: var(--bs-secondary-color); font-size: 12px; margin: 6px 0; }
   /* 截断提示行（超大文件仅预览前 400KB 时的分割线 + 说明 + 下载全文按钮） */
@@ -237,6 +297,19 @@
   @media (hover: hover) { .unpack-row:not(.dir):hover { background: var(--bs-tertiary-bg); } }
   .unpack-row .uname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
   .unpack-row .usz { color: var(--bs-secondary-color); font-size: 12px; flex-shrink: 0; }
+  /* T25 压缩包层级浏览：目录行可点进入（▶）+ 面包屑 */
+  .unpack-row.dir { cursor: pointer; }
+  .unpack-row.dir .uname { color: var(--bs-body-color); font-weight: 500; }
+  @media (hover: hover) { .unpack-row.dir:hover { background: var(--bs-primary-bg-subtle); } }
+  .unpack-row .dir-arrow { color: var(--bs-secondary-color); flex-shrink: 0; display: inline-flex; align-items: center; }
+  .unpack-crumb { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; font-size: 13px; }
+  .unpack-crumb-seg { padding: 2px 8px; border-radius: 6px; cursor: pointer; color: var(--bs-secondary-color);
+                      white-space: nowrap; max-width: 200px; overflow: hidden; text-overflow: ellipsis; }
+  @media (hover: hover) { .unpack-crumb-seg:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); } }
+  .unpack-crumb-seg.cur { color: var(--bs-body-color); font-weight: 600; cursor: default; }
+  @media (hover: hover) { .unpack-crumb-seg.cur:hover { background: none; } }
+  .unpack-crumb-sep { color: var(--bs-border-color); }
+  .unpack-up { flex-shrink: 0; }
   /* 视频容器 */
   .video-wrap { position: relative; width: 100%; max-height: 60vh; max-height: 60dvh; background: #000; border-radius: 8px; overflow: hidden; }
   .video-wrap video { width: 100%; max-height: 60vh; max-height: 60dvh; background: #000; display: block; }
@@ -244,10 +317,10 @@
   /* 转码等待提示（原生模式转码档 409 轮询期间显示） */
   .video-tip { display: none; text-align: center; color: var(--bs-secondary-color); font-size: 13px; padding: 6px 0; }
   /* 进度条预览浮层（缩略图条 / 单帧） */
-  .video-preview { position: absolute; left: 50%; top: 8px; transform: translateX(-50%); z-index: 5;
-                   background: #000; border: 1px solid rgba(255,255,255,.4); border-radius: 6px;
-                   overflow: hidden; pointer-events: none; }
-  .video-preview img { display: block; height: 90px; }
+  .video-preview { position: absolute; z-index: 5;
+                   background: transparent; border: 1px solid rgba(255,255,255,.5); border-radius: 6px;
+                   overflow: hidden; pointer-events: none; }   /* 无黑底：半透明透出视频画面不显暗 */
+  .video-preview img { display: block; height: 90px; opacity: 1; filter: brightness(1.1); transition: opacity .15s ease, filter .15s ease; }   /* 停止后清晰+提亮 1.1；滑动时 JS 置 0.4 无滤镜 */
   /* 字幕覆盖层（MSE 模式用自定义 overlay 显示字幕） */
   .video-sub { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; z-index: 4;
                color: #fff; font-size: 15px; line-height: 1.5; text-shadow: 0 1px 3px #000;
@@ -279,6 +352,9 @@
   .grid-info { font-size: 14px; cursor: pointer; padding: 0 2px; }
   .grid-cover-wrap { width: 88px; height: 88px; display: flex; align-items: center; justify-content: center; }
   .grid-cover { max-width: 88px; max-height: 88px; object-fit: contain; }
+  /* 视频封面：圆角 + cover 填满容器（消除方形 contain 的上下大空白） */
+  .grid-cover.video-thumb { width: 88px; height: 88px; object-fit: cover; border-radius: 10px; }
+  .grid-item:hover .grid-cover.video-thumb { border-radius: 10px; }
   .grid-name { width: 100%; font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all; margin-top: 8px; }
   .grid-size { color: var(--bs-secondary-color); font-size: 11px; margin-top: 2px; }
   /* ===== 手机端（≤575.98px）：触控目标 ≥44px、字号提升、窄屏布局 ===== */
@@ -297,7 +373,7 @@
     #breadcrumb .seg, #breadcrumb .cur { display: inline-flex; align-items: center; min-height: 40px; }
     .type-chip, .tag-chip { min-height: 44px; }   /* 统一触控高度（审计 P2-4：40px < 44px） */
     /* 进度条预览浮层降高：竖屏手机上不再盖住原生控制条 */
-    .video-preview img { height: 56px; }
+    .video-preview img { height: 56px; opacity: 1; filter: brightness(1.1); transition: opacity .15s ease, filter .15s ease; }
     /* 置顶卡头部：窄屏改为两行堆叠（标题行可截断 + 操作按钮行），杜绝 320px 挤压溢出；
        flex-shrink-0 为 Bootstrap !important 工具类，须用 !important 覆盖 */
     #pinnedCard .card-header { flex-wrap: wrap; row-gap: 2px; }
@@ -305,6 +381,7 @@
     /* 网格视图：缩略图略缩 + 列数自适应（320px 可达 3 列，不再窄屏空荡） */
     .grid-cover-wrap { width: 76px; height: 76px; }
     .grid-cover { max-width: 76px; max-height: 76px; }
+    .grid-cover.video-thumb { width: 76px; height: 76px; border-radius: 8px; }
     #fileRows.grid { grid-template-columns: repeat(auto-fill, minmax(88px, 1fr)); }
     .grid-name { font-size: 13px; }
     .grid-size { font-size: 12px; }
@@ -388,12 +465,19 @@
 
   /* ==================== T7 视觉大升级：肉眼可见的现代感与品牌感 ==================== */
   :root {
-    --brand-grad-from: #2563eb;   /* 品牌渐变起点（导航 / 主按钮 / 活动胶囊） */
-    --brand-grad-to: #1e40af;     /* 品牌渐变终点 */
-    --brand-card-shadow: 0 8px 24px rgba(15, 23, 42, .10);   /* 卡片浮起阴影 */
+    --brand-grad-from: #60a5fa;   /* 品牌渐变起点（导航 / 主按钮 / 活动胶囊）- 柔和但清晰 */
+    --brand-grad-to: #3b82f6;     /* 品牌渐变终点 - 中等蓝 */
+    --brand-card-shadow: 0 4px 16px rgba(15, 23, 42, .08), 0 1px 3px rgba(15, 23, 42, .06);   /* 卡片浮起阴影（双层更立体） */
+    --brand-card-border: 1px solid var(--bs-border-color);   /* 卡片清晰描边，消除虚感 */
     --brand-card-radius: 16px;    /* 卡片大圆角 */
     --brand-btn-radius: 10px;     /* 按钮圆角 */
   }
+  /* 卡片清晰描边：所有 .card.shadow-sm 统一加边框（消除浅色下的虚感） */
+  .card.shadow-sm {
+    border: var(--brand-card-border) !important;
+    box-shadow: var(--brand-card-shadow) !important;
+  }
+  .card.shadow-sm .card-header { border-bottom: 1px solid var(--bs-border-color); }
 
   /* 1) 顶部导航：品牌渐变 + 白字；logo 白底蓝字；上传按钮白底高对比 */
   .navbar {
@@ -496,8 +580,8 @@
   /* 7) 深色模式同步（变量翻转 + 导航深蓝渐变 + 各组件深色适配） */
   @media (prefers-color-scheme: dark) {
     :root {
-      --brand-grad-from: #3b82f6;
-      --brand-grad-to: #1d4ed8;
+      --brand-grad-from: #93c5fd;
+      --brand-grad-to: #60a5fa;
       --brand-card-shadow: 0 8px 24px rgba(0, 0, 0, .45);
     }
     .navbar {
@@ -588,13 +672,21 @@
   /* 7) 面包屑当前路径加深 */
   #breadcrumb .cur { font-weight: 700; color: var(--bs-primary); }
 
-  /* 8) 空状态：图标 + 引导（纯 CSS/emoji，不引外部资源） */
+  /* 8) 空状态：内联 SVG 图标（Lucide 描边风格，mask + 变量色深浅自适应）+ 引导文案 */
   .empty {
+    --empty-icon: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%23000'%20stroke-width='1.8'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='m6%2014%201.5-2.9A2%202%200%200%201%209.24%2010H20a2%202%200%200%201%201.94%202.5l-1.54%206a2%202%200%200%201-1.95%201.5H4a2%202%200%200%201-2-2V5a2%202%200%200%201%202-2h3.93a2%202%200%200%201%201.66.9l.82%201.2a2%202%200%200%200%201.66.9H18a2%202%200%200%201%202%202v2'/%3E%3Cpath%20d='M18.5%202.2%20C18.64%203.04%2019.16%203.56%2020%203.7%20C19.16%203.84%2018.64%204.36%2018.5%205.2%20C18.36%204.36%2017.84%203.84%2017%203.7%20C17.84%203.56%2018.36%203.04%2018.5%202.2%20Z'/%3E%3C/svg%3E");
     display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: var(--sp-2); padding: var(--sp-6) var(--sp-4);
-    color: var(--brand-text-2);
+    gap: var(--sp-3); padding: var(--sp-6) var(--sp-4);
+    color: var(--brand-text-2); font-size: 14px;
   }
-  .empty::before { content: "🗂️"; font-size: 40px; line-height: 1; opacity: .65; filter: grayscale(.25); }
+  .empty::before {
+    content: ""; width: 56px; height: 56px; flex-shrink: 0;
+    background-color: var(--bs-secondary-color);
+    -webkit-mask: var(--empty-icon) center / contain no-repeat;
+    mask: var(--empty-icon) center / contain no-repeat;
+  }
+  /* T38 P3-6：主列表空状态整体垂直居中 + 留白呼吸感（不作用于侧边栏/收藏面板内的空态） */
+  #fileRows > .empty { min-height: 45vh; }
 
   /* 9) 留白呼吸感：卡片间距 / 列表行高 / 置顶列表内边距微增 */
   .card.mb-2 { margin-bottom: var(--sp-4) !important; }                    /* 置顶卡间距 8→16px */
@@ -602,7 +694,14 @@
   .list-group-item { padding-top: .625rem !important; padding-bottom: .625rem !important; }  /* py-2 → py-2.5 */
 
   /* ---- 10) 视觉审查（mimo-v2.5-free）反馈微调 ---- */
-  .list-group-item .ic img { width: 22px !important; height: 22px !important; }   /* 行图标 20→22px */
+  .list-group-item .ic img { max-width: 26px; max-height: 26px; }   /* T29：彩色 <img> 图标尺寸与行内线条图标一致（26px），小尺寸调用（收藏 16px 等）原样保留 */
+  /* T17 补充：文件类型图标 inline 化——行图标 26px + hover 轻微放大；网格 inline 图标 */
+  .list-group-item .ic svg { display: block; margin: 0 auto; }
+  .list-group-item .ic, .grid-cover.ic-inline { transition: transform .15s ease; }
+  @media (hover: hover) {
+    .list-group-item:hover .ic, .grid-item:hover .grid-cover.ic-inline { transform: scale(1.1); }
+  }
+  .grid-cover.ic-inline { display: inline-flex; align-items: center; justify-content: center; }
   #driveTabs { margin-bottom: var(--sp-3) !important; }                           /* 盘符栏与置顶卡间距 8→12px */
   .modal-content { box-shadow: 0 16px 48px rgba(15, 23, 42, .18); }               /* 弹窗阴影增强 */
   .btn-close { width: 24px !important; height: 24px !important; }
@@ -616,6 +715,8 @@
   /* ==================== T9 长按多选模式 ==================== */
   /* 行内多选 checkbox：默认隐藏，进入多选模式（行加 .bulk-mode）后显示 */
   .bulk-cb { display: none; align-items: center; flex-shrink: 0; }
+  /* T37：列表统计行（共 N 项 · X 个目录 · Y 个文件） */
+  .list-stats { padding: 6px 14px 0; font-size: 12px; color: var(--bs-secondary-color); user-select: none; }
   .bulk-mode .bulk-cb { display: inline-flex; align-items: center; margin-right: 2px; }
   .bulk-cb .form-check-input { margin: 0; cursor: pointer; }
   /* 多选模式行交互：禁文本选择防误触；选中/按压反馈 */
@@ -647,63 +748,78 @@
     display: inline-block;
   }
 
-  /* ==================== T11 全屏预览层（方案A；为方案B 独立页面铺路） ==================== */
-  .fs-layer {
-    position: fixed; inset: 0; z-index: 1090;
-    background: rgba(9, 13, 20, .96);
-    display: flex; flex-direction: column;
-    opacity: 0; pointer-events: none;
-    transition: opacity .22s ease;
-  }
-  .fs-layer.show { opacity: 1; pointer-events: auto; }
-  .fs-bar {
-    display: flex; align-items: center; gap: var(--sp-2);
-    padding: calc(10px + env(safe-area-inset-top)) var(--sp-4) 10px;
-    color: #fff; flex-shrink: 0;
-    background: rgba(255, 255, 255, .06);
-    border-bottom: 1px solid rgba(255, 255, 255, .12);
-  }
-  .fs-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-  .fs-close {
-    width: 34px; height: 34px; border-radius: 50%;
-    border: none; background: rgba(255, 255, 255, .14); color: #fff;
-    font-size: 15px; cursor: pointer;
-    transition: background-color .15s ease, transform .15s ease;
-  }
-  .fs-close:hover { background: rgba(255, 255, 255, .3); transform: scale(1.08); }
-  #fsBody {
-    flex: 1; min-height: 0; overflow: auto;
-    display: flex; align-items: center; justify-content: center;
-    padding: var(--sp-2);
-    transform: scale(.97); transition: transform .22s ease;
-  }
-  .fs-layer.show #fsBody { transform: scale(1); }
-  /* 全屏内：视频/图片最大化 contain；文本/代码全屏滚动 */
-  #fsBody .video-wrap {
-    max-height: none; height: 100%; width: 100%;
-    background: transparent; border-radius: 0;
-  }
-  #fsBody video { max-height: 100%; max-width: 100%; width: auto; height: auto; object-fit: contain; }
-  #fsBody .img-preview-wrap {
-    max-height: none; max-width: none; height: 100%; width: 100%;
-    background: transparent; border: none; padding: 0;
-  }
-  #fsBody .img-preview { max-width: 100%; max-height: 100%; width: auto; height: auto; object-fit: contain; }
-  #fsBody .text-pre, #fsBody .md-code {
-    height: 100%; max-height: none; font-size: 14px;
-    background: transparent; border: none;
-  }
-  #fsBody .md-table, #fsBody .unpack-list { max-height: none; }
-  #fsBody iframe { width: 100%; height: 100%; border: 0; border-radius: 8px; background: #fff; }
-  #fsBody .fs-dl { color: #fff; border-color: rgba(255,255,255,.4); }
-  @media (prefers-reduced-motion: reduce) {
-    .fs-layer, #fsBody { transition: none; }
-  }
-
   /* ==================== T12 自定义 clickable 元素防文本选中（点击不出现复制光标） ==================== */
-  #pinnedHead { user-select: none; -webkit-user-select: none; cursor: pointer; }   /* 置顶折叠头 */
+  #pinnedHead { user-select: none; -webkit-user-select: none; cursor: pointer; }   /* 置顶折叠头（t16 已移除，保留防回归） */
   #breadcrumb .seg, #breadcrumb .cur { user-select: none; -webkit-user-select: none; }  /* 面包屑 */
   .pk-dir-btn, .grid-info, .vtag, #packMiniBar { user-select: none; -webkit-user-select: none; }  /* 其余自定义交互点 */
+
+  /* ==================== T16 收藏悬浮球 + 收藏面板 ==================== */
+  .pin-fab {
+    position: fixed; right: 16px; bottom: max(16px, calc(env(safe-area-inset-bottom) + 12px));
+    z-index: 1050;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--brand-grad-from), var(--brand-grad-to));
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 6px 18px rgba(37, 99, 235, .35);
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+    transition: transform .15s ease, box-shadow .15s ease;
+  }
+  @media (hover: hover) {
+    .pin-fab:hover { transform: scale(1.08); box-shadow: 0 8px 24px rgba(37, 99, 235, .45); }
+    /* T38 P3-3：hover 在球旁显示「收藏」小标签（淡入淡出；触屏无 hover 不显示） */
+    .pin-fab::after {
+      content: "收藏";
+      position: absolute; right: calc(100% + 10px); top: 50%;
+      transform: translateY(-50%);
+      background: rgba(17, 24, 39, .85); color: #fff;
+      font-size: 12px; line-height: 1; padding: 6px 10px; border-radius: 6px;
+      white-space: nowrap; pointer-events: none;
+      opacity: 0; transition: opacity .2s ease;
+    }
+    .pin-fab:hover::after { opacity: 1; }
+  }
+  .pin-fab-icon { font-size: 22px; line-height: 1; }
+  .pin-fab-badge {
+    position: absolute; top: -3px; right: -3px;
+    min-width: 20px; height: 20px; padding: 0 5px;
+    border-radius: 999px; background: var(--brand-accent, #f59e0b); color: #fff;
+    font-size: 11px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 2px solid var(--brand-surface);
+  }
+  .pin-panel {
+    position: fixed; right: 16px; bottom: calc(76px + env(safe-area-inset-bottom));
+    z-index: 1051;
+    width: min(380px, calc(100vw - 32px));
+    max-height: min(70vh, 560px); max-height: min(70dvh, 560px);
+    background: var(--brand-surface);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 16px;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, .18);
+    display: flex; flex-direction: column; overflow: hidden;
+    opacity: 0; pointer-events: none;
+    transform: translateY(12px) scale(.96);
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .pin-panel.show { opacity: 1; pointer-events: auto; transform: none; }
+  .pin-panel-head {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--bs-border-color);
+    background: var(--bs-primary-bg-subtle);
+    flex-shrink: 0;
+  }
+  .pin-panel-body { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 14px; }
+  @media (max-width: 575.98px) {
+    .pin-fab { right: 14px; bottom: calc(env(safe-area-inset-bottom) + 14px); }
+    .pin-panel { right: 10px; left: 10px; width: auto; bottom: calc(66px + env(safe-area-inset-bottom)); }
+  }
+  @media (prefers-color-scheme: dark) {
+    .pin-panel { box-shadow: 0 12px 40px rgba(0, 0, 0, .5); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .pin-panel { transition: none; }
+  }
 </style>
 </head>
 <body class="bg-body-tertiary">
@@ -712,12 +828,12 @@
 <nav class="navbar fixed-top bg-white border-bottom shadow-sm py-1">
   <div class="container-fluid px-2">
     <span class="navbar-brand d-flex align-items-center gap-2 mb-0 fs-6">
-      <span class="logo">☁</span> 电脑网盘
+      <span class="logo"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></span> 电脑网盘
     </span>
     <div class="d-flex gap-2 align-items-center">
       <button id="uploadBtn" class="btn btn-outline-primary btn-sm">
-        <span class="d-none d-sm-inline">⬆ 上传到当前目录</span>
-        <span class="d-inline d-sm-none">⬆ 上传</span>
+        <span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M4 20h16"/></svg> 上传到当前目录</span>
+        <span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 16V4"/><path d="M8 8l4-4 4 4"/><path d="M4 20h16"/></svg> 上传</span>
       </button>
       <input type="file" id="fileInput" multiple hidden>
     </div>
@@ -728,35 +844,15 @@
   <!-- 磁盘标签：一行横向可滚动胶囊按钮，手机上手指左右滑 -->
   <div id="driveTabs" class="d-flex overflow-x-auto gap-1 py-1 mb-2"></div>
 
-  <!-- 置顶文件卡片（头部可点击折叠） -->
-  <div id="pinnedCard" class="card shadow-sm mb-2">
-    <div class="card-header bg-white d-flex align-items-center justify-content-between py-2">
-      <div class="d-flex align-items-center gap-2 flex-shrink-0" id="pinnedHead" role="button" tabindex="0" aria-expanded="true" title="展开/收起置顶文件">
-        <span class="fs-6 fw-semibold" id="pinnedHeadTitle">📌 置顶文件 · 0 项 · 共 —</span>
-        <span class="small text-muted" id="pinnedChevron">▼</span>
-      </div>
-      <div class="d-flex align-items-center gap-2">
-        <div class="btn-group flex-shrink-0" id="packGroup">
-          <button id="packBtn" class="btn btn-outline-primary btn-sm" title="打开打包中心">📦 打包</button>
-        </div>
-        <button id="shareAllBtn" class="btn btn-outline-primary btn-sm flex-shrink-0">
-          <span class="d-none d-sm-inline">🔗 全部分享</span>
-          <span class="d-inline d-sm-none">🔗 分享</span>
-        </button>
-        <button id="clearPinBtn" class="btn btn-link btn-sm text-danger flex-shrink-0 text-nowrap p-0 d-none" title="清空全部置顶">全部清空</button>
-        <span id="pinCount" class="badge text-bg-secondary rounded-pill flex-shrink-0"></span>
-      </div>
-    </div>
-    <div class="card-body py-2" id="pinnedList"></div>
-  </div>
+  <!-- 收藏横条已移除（t16）：改为右下角悬浮球 #pinFab + 收藏面板 #pinPanel，见 body 末尾 -->
 
   <!-- 工具栏：导航（后退/前进）+ 面包屑（横向滚动）+ 刷新/视图切换（窄屏图标化腾出面包屑宽度） -->
   <div class="d-flex align-items-center gap-2 mb-2">
-    <button id="navBack" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="后退" disabled>←</button>
-    <button id="navFwd" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="前进" disabled>→</button>
+    <button id="navBack" class="nav-icon-btn flex-shrink-0" title="后退" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <button id="navFwd" class="nav-icon-btn flex-shrink-0" title="前进" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
     <div id="breadcrumb" class="d-flex align-items-center overflow-x-auto text-nowrap flex-grow-1 py-1"></div>
-    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0"><span class="d-none d-sm-inline">↻ 刷新</span><span class="d-inline d-sm-none">↻</span></button>
-    <button id="viewBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="视图与筛选"><span class="d-none d-sm-inline">▦ 筛选</span><span class="d-inline d-sm-none">▦</span></button>
+    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> 刷新</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span></button>
+    <button id="viewBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="视图与筛选"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> 筛选</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span></button>
   </div>
 
   <div id="alert" class="alert alert-danger py-2 mb-2 d-none"></div>
@@ -773,15 +869,16 @@
       <div class="d-flex flex-wrap align-items-center gap-2 px-3 py-2 border-bottom">
         <span class="fw-semibold small flex-shrink-0" id="bulkCount">已选 0 项</span>
         <button type="button" id="bulkSelectAll" class="btn btn-sm btn-outline-primary flex-shrink-0">全选</button>
-        <button type="button" id="bulkPin" class="btn btn-sm btn-outline-primary flex-shrink-0" title="置顶选中的文件">📌 置顶</button>
-        <button type="button" id="bulkUnpin" class="btn btn-sm btn-outline-warning flex-shrink-0" title="取消置顶">✕ 取消置顶</button>
-        <button type="button" id="bulkShare" class="btn btn-sm btn-outline-primary flex-shrink-0" title="批量生成分享链接">🔗 分享</button>
-        <button type="button" id="bulkDownload" class="btn btn-sm btn-outline-primary flex-shrink-0" title="下载选中的文件">⬇ 下载</button>
-        <button type="button" id="bulkPack" class="btn btn-sm btn-primary flex-shrink-0" title="打包选中的文件">📦 打包</button>
+        <button type="button" id="bulkPin" class="btn btn-sm btn-outline-primary flex-shrink-0" title="收藏选中的文件"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></svg> 收藏</button>
+        <button type="button" id="bulkUnpin" class="btn btn-sm btn-outline-warning flex-shrink-0" title="取消收藏"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> 取消收藏</button>
+        <button type="button" id="bulkShare" class="btn btn-sm btn-outline-primary flex-shrink-0" title="批量生成分享链接"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg> 分享</button>
+        <button type="button" id="bulkDownload" class="btn btn-sm btn-outline-primary flex-shrink-0" title="下载选中的文件"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M12 4v12"/><path d="M8 12l4 4 4-4"/><path d="M4 20h16"/></svg> 下载</button>
+        <button type="button" id="bulkPack" class="btn btn-sm btn-primary flex-shrink-0" title="打包选中的文件"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 打包</button>
         <span class="flex-grow-1"></span>
-        <button type="button" id="bulkCancel" class="btn btn-sm btn-outline-secondary flex-shrink-0" title="退出多选">✕ 取消</button>
+        <button type="button" id="bulkCancel" class="btn btn-sm btn-outline-secondary flex-shrink-0" title="退出多选"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg> 取消</button>
       </div>
     </div>
+    <div id="listStats" class="list-stats d-none"></div>
     <div id="fuzzyHint" class="render-tip d-none" style="padding:6px 14px 0"></div>
     <ul id="fileRows" class="list-group list-group-flush"></ul>
   </div>
@@ -799,7 +896,7 @@
   <div id="packTasks" class="overflow-auto px-3 py-2"></div>
   <div id="packNewTask" class="border-top px-3 py-2">
     <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-      <span class="small fw-semibold flex-grow-1" id="packNewLabel">将打包置顶的 0 项</span>
+      <span class="small fw-semibold flex-grow-1" id="packNewLabel">将打包收藏的 0 项</span>   <!-- T36：置顶→收藏 文案统一 -->
       <div class="btn-group btn-group-sm" id="packModeGroup">
         <button type="button" class="btn btn-outline-primary btn-sm px-2" data-amode="store" title="不压缩，最快">⚡不压缩</button>
         <button type="button" class="btn btn-outline-primary btn-sm px-2" data-amode="fast" title="低压缩，快">🚀快</button>
@@ -813,7 +910,26 @@
 </div>
 
 <!-- 打包中心迷你条（面板折叠时右下角提示） -->
-<div id="packMiniBar" class="d-none">📦 打包中心</div>
+<div id="packMiniBar" class="d-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 打包中心</div>
+
+<!-- 收藏悬浮球（FAB）：常驻右下角，有收藏时显示数量徽标；分享模式隐藏 -->
+<div id="pinFab" class="pin-fab d-none" role="button" tabindex="0" title="收藏" aria-label="打开收藏列表">
+  <span class="pin-fab-icon"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></svg></span>
+  <span id="pinFabBadge" class="pin-fab-badge d-none">0</span>
+</div>
+
+<!-- 收藏面板（点击悬浮球弹出：列表 + 底部操作，样式参考预览卡片） -->
+<div id="pinPanel" class="pin-panel" role="dialog" aria-label="收藏列表">
+  <div class="pin-panel-head">
+    <span class="fs-6 fw-semibold" id="pinPanelTitle"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;color:var(--brand-accent,#f59e0b)"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01z"/></svg> 收藏 · 0 项</span>
+    <span class="flex-grow-1"></span>
+    <button type="button" id="pinShareAllBtn" class="btn btn-outline-primary btn-sm flex-shrink-0" title="全部收藏生成分享链接"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg> 全部分享</button>
+    <button type="button" id="pinPackBtn" class="btn btn-outline-primary btn-sm flex-shrink-0" title="打开打包中心"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg> 打包</button>
+    <button type="button" id="pinClearBtn" class="btn btn-link btn-sm text-danger text-nowrap p-0 d-none" title="清空全部收藏">全部清空</button>
+    <button type="button" class="btn-close ms-1" id="pinPanelClose" aria-label="关闭"></button>
+  </div>
+  <div id="pinPanelBody" class="pin-panel-body"></div>
+</div>
 
 <!-- 轻量 toast -->
 <div id="toast" class="app-toast" role="status" aria-live="polite"></div>
@@ -829,17 +945,6 @@
       <div class="modal-body" id="appModalBody"></div>
     </div>
   </div>
-</div>
-
-<!-- 全屏预览层（方案A：预览弹窗内 ⛶ 放大；样式与 modal 解耦，供方案B /view 独立页复用） -->
-<div id="fsLayer" class="fs-layer" aria-label="全屏预览">
-  <div class="fs-bar">
-    <span class="fs-title" id="fsTitle"></span>
-    <span class="flex-grow-1"></span>
-    <span id="fsBarDl"></span>
-    <button type="button" class="fs-close" id="fsClose" aria-label="退出全屏">✕</button>
-  </div>
-  <div id="fsBody" class="fs-content"></div>
 </div>
 
 <!-- 右侧滑出侧边栏：视图切换 / 类型筛选 / 排序 / 搜索 -->
@@ -863,17 +968,32 @@
     <div class="mb-3">
       <div class="d-flex align-items-center justify-content-between mb-1">
         <label class="form-label small fw-semibold mb-0">推荐标签</label>
-        <button type="button" id="tagRefresh" class="btn btn-link btn-sm p-0 text-decoration-none" title="重新扫描当前目录">↻</button>
+        <button type="button" id="tagRefresh" class="btn btn-link btn-sm p-0 text-decoration-none" title="重新扫描当前目录"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></button>
       </div>
       <div id="tagSuggest" class="d-flex flex-wrap gap-1"></div>
+      <div class="text-muted small mt-1" style="opacity:.8">点击标签快速搜索 · 标签来自当前目录文件名与元数据</div>
       <div id="tagHint" class="text-muted small mt-1"></div>
     </div>
     <div class="mb-3">
       <label class="form-label small fw-semibold mb-1">视图</label>
       <div class="btn-group w-100" role="group" aria-label="视图切换">
-        <button type="button" id="viewListBtn" class="btn btn-sm btn-outline-primary">☰ 列表</button>
-        <button type="button" id="viewGridBtn" class="btn btn-sm btn-outline-primary">▦ 网格</button>
+        <button type="button" id="viewListBtn" class="btn btn-sm btn-outline-primary"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> 列表</button>
+        <button type="button" id="viewGridBtn" class="btn btn-sm btn-outline-primary"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg> 网格</button>
       </div>
+    </div>
+    <div class="mb-3">
+      <label class="form-label small fw-semibold mb-1">图标风格</label>
+      <div class="btn-group w-100" role="group" aria-label="图标风格切换">
+        <button type="button" id="iconLineBtn" class="btn btn-sm btn-outline-primary">线条</button>
+        <button type="button" id="iconColorBtn" class="btn btn-sm btn-outline-primary">彩色</button>
+      </div>
+    </div>
+    <div class="mb-3">
+      <label class="form-label small fw-semibold mb-1">显示隐藏文件</label>
+      <label class="form-check form-switch mb-0 d-flex align-items-center justify-content-between" title="显示以 . 或 ~ 开头、以及带隐藏属性的文件">
+        <span class="small text-muted">列出隐藏文件（. / ~ 开头、隐藏属性）</span>
+        <input type="checkbox" id="showHiddenToggle" class="form-check-input" role="switch">
+      </label>
     </div>
     <div class="mb-3">
       <label class="form-label small fw-semibold mb-1">类型筛选（多选）</label>
