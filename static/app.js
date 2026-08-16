@@ -989,7 +989,8 @@ function strBytes(s) {
   try { return new TextEncoder().encode(String(s == null ? "" : s)).length; }
   catch (e) { return String(s == null ? "" : s).length; }
 }
-function esc(s) { return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+// C4（t13 批次1）：esc 加 null 守卫——null/undefined 按空串处理，不再抛 TypeError
+function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 // ==================== T36 敏感信息脱敏（P1：预览页密钥类内容自动打码） ====================
 // 共享函数 maskSensitive(text)：对疑似真实密钥打码（保留前4后4，中间 ****）。
@@ -1102,11 +1103,21 @@ let modalState = null;
 let modalHistoryPushed = false;
 // 当前异步预览弹窗的 AbortController（可取消加载；hidden.bs.modal 兜底中断）
 let _activePreviewAbort = null;
+// B6（t13 批次1）：当前预览闭包的统一清理函数（revoke 全部 Blob URL / removeTrack）。
+// openModal 替换内容与 hidden.bs.modal 关闭弹窗时各执行一次；无预览注册时为 no-op。
+let _activePreviewCleanup = null;
+function _runPreviewCleanup() {
+  if (_activePreviewCleanup) {
+    try { _activePreviewCleanup(); } catch (e) { /* 忽略 */ }
+    _activePreviewCleanup = null;
+  }
+}
 function openModal(title, bodyNode, state) {
   $("appModalTitle").textContent = title;
   const b = $("appModalBody");
   // 打开新弹窗前先彻底停止旧弹窗里的音视频（防止后台继续播放/下载）
   b.querySelectorAll("video,audio").forEach(stopMedia);
+  _runPreviewCleanup();   // B6：旧预览的 Blob URL 统一 revoke（先 stopMedia 清 src，再 revoke）
   b.innerHTML = "";
   if (bodyNode) b.appendChild(bodyNode);
   modalState = state || null;
@@ -1126,6 +1137,7 @@ function stopMedia(el) {
 $("appModal").addEventListener("hidden.bs.modal", () => {
   if (_activePreviewAbort) { _activePreviewAbort.abort(); _activePreviewAbort = null; }
   $("appModalBody").querySelectorAll("video,audio").forEach(stopMedia);
+  _runPreviewCleanup();   // B6：弹窗关闭统一 revoke Blob URL（含 <track> removeTrack）
   modalState = null;
   try { localStorage.removeItem("drive.modal"); } catch (e) { /* localStorage 禁用时忽略 */ }
   // 用户点 ❌ 关闭时把之前 push 的 history 条目退掉，保持历史栈一致；
@@ -1639,6 +1651,17 @@ async function showDetail(path, name) {
 //           浏览器对 MSE 喂入数据的格式嗅探不受"媒体子资源证书限制"，免装证书即可播放。
 function showVideo(path, name) {
   const body = document.createElement("div");
+  // B6（t13 批次1）：本预览创建的全部 Blob URL（subVtt/asrVtt/strip/MSE）统一登记，
+  // 弹窗关闭时一次 revoke；disposed 标记让关闭后仍在飞行的异步回调（字幕/识别/缩略图条）
+  // 新创建的 URL 直接 revoke，不做无谓保留，避免关闭后再泄漏。
+  const blobUrls = [];
+  let disposed = false;
+  function keepBlob(u) {
+    if (!u) return u;
+    if (disposed) { try { URL.revokeObjectURL(u); } catch (e) { /* 忽略 */ } }
+    else { blobUrls.push(u); }
+    return u;
+  }
   // ---- 控制条：画质 / 免证书 / 缓存下载 / 字幕 ----
   const ctrl = document.createElement("div");
   ctrl.className = "d-flex flex-wrap align-items-center gap-2 mb-2 small";
@@ -2175,7 +2198,9 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       .then(txt => {
         if (!txt) return;
         const url = URL.createObjectURL(new Blob([txt], { type: "text/vtt" }));
+        if (disposed) { try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ } return; }   // B6：弹窗已关，立即释放
         subVtt = { url, src: txt };
+        blobUrls.push(url);
         if (subChk.input.checked) {
           if (mse) { subMode = "overlay"; setupSubOverlay(); }
           else { subMode = "track"; removeTrack(); attachTrack(url); }
@@ -2237,7 +2262,10 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       .then(txt => {
         if (!txt) { pendingAsrLoad = false; return; }
         pendingAsrLoad = false;
-        asrVtt = { url: URL.createObjectURL(new Blob([txt], { type: "text/vtt" })), src: txt };
+        const url = URL.createObjectURL(new Blob([txt], { type: "text/vtt" }));
+        if (disposed) { try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ } return; }   // B6：弹窗已关，立即释放
+        asrVtt = { url, src: txt };
+        blobUrls.push(url);
         if (asrChk.input.checked) {
           if (mse) { subMode = "overlay"; setupSubOverlay(); }
           else { subMode = "track"; removeTrack(); attachTrack(asrVtt.url); }
@@ -2287,7 +2315,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const ms = new MediaSource();
     mse = { ms, sb: null, fetching: false, offset: 0, buf: new Uint8Array(0), start, wantAppend: false, gen: (mse ? mse.gen : 0) + 1, fetchSeq: 0, pendingSeek: start, q };
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
-    lastMsUrl = URL.createObjectURL(ms);
+    lastMsUrl = keepBlob(URL.createObjectURL(ms));   // B6：MSE blob URL 一并登记，弹窗关闭统一 revoke
     v.src = lastMsUrl;
     const myGen = mse.gen;
     ms.addEventListener("sourceopen", () => {
@@ -2380,7 +2408,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const ms = new MediaSource();
     mse.ms = ms;
     if (lastMsUrl) { try { URL.revokeObjectURL(lastMsUrl); } catch (e) { /* 忽略 */ } }
-    lastMsUrl = URL.createObjectURL(ms);
+    lastMsUrl = keepBlob(URL.createObjectURL(ms));   // B6：MSE blob URL 一并登记，弹窗关闭统一 revoke
     v.src = lastMsUrl;
     const myGen = mse.gen;
     ms.addEventListener("sourceopen", () => {
@@ -2616,7 +2644,10 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       })
       .then(({ b, n, dur }) => {
         if (!(n > 0) || !(dur > 0)) { strip = null; return; }
-        strip = { url: URL.createObjectURL(b), n, dur };
+        const url = URL.createObjectURL(b);
+        if (disposed) { try { URL.revokeObjectURL(url); } catch (e) { /* 忽略 */ } return; }   // B6：弹窗已关，立即释放
+        strip = { url, n, dur };
+        blobUrls.push(url);
       })
       .catch(() => { strip = null; /* 缩略图条不可用：回退单帧 */ });
   }
@@ -2713,6 +2744,16 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   if (mseChk.input.checked) startMse().catch(e => showErr("MSE 启动失败: " + (e && e.message)));
   else playNative();
   if (subChk.input.checked) loadSubtitle();
+
+  // B6：注册本预览清理函数——弹窗关闭（hidden.bs.modal）或切换其它预览（openModal）时统一执行：
+  // revoke subVtt/asrVtt/strip/MSE 的全部 Blob URL，并同步 removeTrack 释放 <track> 引用。
+  // 顺序保障：hidden.bs.modal / openModal 均先 stopMedia（清 v.src）再执行本清理。
+  _activePreviewCleanup = () => {
+    disposed = true;
+    try { removeTrack(); } catch (e) { /* 忽略 */ }
+    blobUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) { /* 忽略 */ } });
+    blobUrls.length = 0;
+  };
 }
 
 // ---------------- 功能 3：文本查看 + 内置 Markdown 渲染 ----------------
@@ -3012,9 +3053,46 @@ async function renderUnpackLevel(rootEl, ac, path, name, dir) {
   rootEl.appendChild(btns);
 }
 
+// A1（t13 批次1）：api() 改"永不抛"封装（修复断网/服务重启时永久骨架屏/白屏）。
+// 策略：
+//  - 内部 AbortController + 可配超时（默认 20s；opt.timeout 可覆盖，loadList 大目录放宽 40s）；
+//  - 外部 signal（opt.signal）与内部 controller 并存：监听外部 abort → 同步 abort 内部请求，
+//    并把 AbortError 原样抛回（五个带 signal 调用点的既有取消语义不变）；
+//    不用 AbortSignal.any（Safari 15.4 前无此 API，且无法区分超时与取消）；
+//  - 网络失败 / 非 2xx / 响应解析失败一律返回 { error }，永不 reject。
 async function api(ep, opt) {
-  const r = await fetch(BASE + ep, opt);
-  return r.json();
+  opt = opt || {};
+  const outer = opt.signal;
+  const timeout = (typeof opt.timeout === "number" && opt.timeout > 0) ? opt.timeout : 20000;
+  const ac = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ac.abort(); }, timeout);
+  const onOuterAbort = () => ac.abort();
+  if (outer) {
+    if (outer.aborted) ac.abort();
+    else outer.addEventListener("abort", onOuterAbort, { once: true });
+  }
+  try {
+    const r = await fetch(BASE + ep, Object.assign({}, opt, { signal: ac.signal }));
+    let j = null;
+    try { j = await r.json(); } catch (e) { /* 非 JSON 响应（如 403 错误页），按失败处理 */ }
+    if (!r.ok) {
+      // 服务端错误响应若带 {error} 则透传（23 个调用点只认 j.error）
+      if (j && typeof j === "object" && typeof j.error === "string") return j;
+      return { error: "请求失败（HTTP " + r.status + "）" };
+    }
+    return j === null ? { error: "响应解析失败" } : j;
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      if (timedOut) return { error: "请求超时，请重试" };
+      if (outer && outer.aborted) throw e;   // 外部取消：保留原取消语义（调用方 await 收到 AbortError）
+      return { error: "请求已取消" };
+    }
+    return { error: "网络错误，无法连接服务" };
+  } finally {
+    clearTimeout(timer);
+    if (outer) { try { outer.removeEventListener("abort", onOuterAbort); } catch (e) { /* 忽略 */ } }
+  }
 }
 
 function hideMainUi() {
@@ -3053,6 +3131,12 @@ async function init() {
     return;
   }
   const info = await api("api/info");
+  if (info.error) {
+    // A1（t13 批次1）：api 永不抛后这里必然走到错误分支——显示错误 + 重试，不再白屏
+    $("fileRows").innerHTML = '<div class="empty">' + esc(info.error) + "</div>";
+    showAlert(info.error, [{ label: "↻ 重试", fn: () => init() }]);
+    return;
+  }
   roots = info.roots || [];
   pinned = info.pinned || [];
   infoUrls = Array.isArray(info.urls) ? info.urls : [];
@@ -4018,7 +4102,8 @@ async function loadList(path, opts) {
     '<div class="skeleton-row"><span class="sk-ic"></span><span class="sk-line w40"></span><span class="sk-line w12" style="margin-left:auto"></span></div>'.repeat(6) +
     '</div>';
   // meta=1：附带每个 entry 的 meta.kind，供侧边栏类型筛选/排序/搜索使用
-  const data = await api("api/list?path=" + encodeURIComponent(path) + "&meta=1" + (showHidden ? "&show_hidden=1" : ""));   // T37
+  // T37 / A1（t13 批次1）：大目录 meta=1 响应慢，超时放宽到 40s（api 默认 20s 可配）
+  const data = await api("api/list?path=" + encodeURIComponent(path) + "&meta=1" + (showHidden ? "&show_hidden=1" : ""), { timeout: 40000 });
   if (data.error) {
     currentEntries = [];
     tagScanReset(); tagRenderEmpty();
@@ -4055,9 +4140,6 @@ async function loadList(path, opts) {
   // 目录已切换/内容可能变化：使该目录标签缓存失效并重新扫描（侧边栏打开时可见渐出效果）
   _tagCache.delete(cur);
   startTagScan();
-  if (!SHARE_MODE) {
-    // t16：收藏改悬浮球+面板，切目录无需折叠操作
-  }
 }
 
 // T37：列表统计行「共 N 项 · X 个目录 · Y 个文件」
@@ -4105,6 +4187,47 @@ function listItem(e) {
   return row;
 }
 
+// 网格封面（A3/t13 批次1）：图片缩略图一律 createElement + 统一 onerror 回退，
+// 消除旧实现「BASE/路径拼进 onerror 内联字符串」的引号嵌套注入通道；
+// 回退到类型图标与 listItem 的图标回退同源（跟随当前线条/彩色风格）。
+function gridCover(e) {
+  if (e.is_dir) {
+    const sp = document.createElement("span");
+    sp.className = "grid-cover ic-inline";
+    sp.innerHTML = '<span class="ic-wrap">' + typeIcon("folder", 72) +
+      (e.denied ? '<span class="deny-lock">' + icon("locked", 16) + "</span>" : "") + "</span>";
+    return sp;
+  }
+  if (e.locked) {
+    const sp = document.createElement("span");
+    sp.className = "grid-cover ic-inline";
+    sp.innerHTML = typeIcon("locked", 72);
+    return sp;
+  }
+  const kind = fileKind(e.name);
+  if (kind === "video" || kind === "image") {
+    const img = document.createElement("img");
+    img.loading = "lazy";
+    img.className = "grid-cover video-thumb";
+    img.alt = "";
+    img.dataset.fallback = kind;
+    img.onerror = () => gridThumbFallback(img);
+    img.src = BASE + (kind === "video" ? "api/thumb?path=" : "api/img?path=") + encodeURIComponent(e.path);
+    return img;
+  }
+  const sp = document.createElement("span");
+  sp.className = "grid-cover ic-inline";
+  sp.innerHTML = fileIcon(e.name, 72);
+  return sp;
+}
+
+// 缩略图加载失败统一回退：换成对应类型图标；先置 onerror=null 防回退图自身失败死循环
+function gridThumbFallback(img) {
+  img.onerror = null;
+  const kind = img.dataset.fallback === "image" ? "image" : "video";
+  img.src = BASE + (iconStyle === "color" ? "static/icons/color/" + kind + ".svg" : "static/icons/" + kind + ".svg");
+}
+
 // 网格模式条目：大图标 + 名称 + 大小；点击行为与 list 完全一致
 function gridItem(e) {
   const locked = !!e.locked;
@@ -4112,22 +4235,7 @@ function gridItem(e) {
   const card = document.createElement("li");
   card.className = "grid-item" + (locked ? " text-muted opacity-75" : "") + (denied ? " denied" : "");
   if (denied) card.title = "无权限访问该目录";
-  let cover;
-  if (e.is_dir) {
-    cover = '<span class="grid-cover ic-inline">' + '<span class="ic-wrap">' + typeIcon("folder", 72) + (denied ? '<span class="deny-lock">' + icon("locked", 16) + "</span>" : "") + "</span>" + "</span>";
-  } else if (locked) {
-    cover = '<span class="grid-cover ic-inline">' + typeIcon("locked", 72) + "</span>";
-  } else if (fileKind(e.name) === "video") {
-    // 视频封面：后端缩略图，加载失败回退视频图标
-    cover = '<img loading="lazy" src="' + BASE + "api/thumb?path=" + encodeURIComponent(e.path) +
-            '" onerror="this.onerror=null;this.src=\'' + BASE + (iconStyle === "color" ? "static/icons/color/video.svg" : "static/icons/video.svg") + '\'" class="grid-cover video-thumb" alt="">';
-  } else if (fileKind(e.name) === "image") {
-    // 图片封面：直接显示图片本身（api/img），失败回退图片图标——与视频缩略图一致
-    cover = '<img loading="lazy" src="' + BASE + "api/img?path=" + encodeURIComponent(e.path) +
-            '" onerror="this.onerror=null;this.src=\'" + BASE + (iconStyle === "color" ? "static/icons/color/image.svg" : "static/icons/image.svg") + "\'" class="grid-cover video-thumb" alt="">';
-  } else {
-    cover = '<span class="grid-cover ic-inline">' + fileIcon(e.name, 72) + "</span>";
-  }
+  const cover = gridCover(e);   // A3：createElement 构建封面（含 img.onerror 统一回退）
   card.dataset.path = e.path;              // 多选批量操作取路径
   card.dataset.dir = e.is_dir ? "1" : "";  // 批量下载跳过目录
   // 常驻 grid-star 已移除（t9）：置顶改由「长按多选 → 批量置顶」完成
@@ -4135,9 +4243,10 @@ function gridItem(e) {
     '<div class="grid-top">' +
     '  <span class="bulk-cb"><input type="checkbox" class="form-check-input" aria-label="选择"></span>' +
     "</div>" +
-    '<div class="grid-cover-wrap">' + cover + "</div>" +
+    '<div class="grid-cover-wrap"></div>' +
     '<div class="grid-name"></div>' +
     '<div class="grid-size">' + (e.is_dir ? "" : fmtSize(e.size)) + "</div>";   // T35：卡片分享按钮移除（批量再分享替代）
+  card.querySelector(".grid-cover-wrap").appendChild(cover);
   card.querySelector(".grid-name").textContent = e.name;
   card.querySelector(".grid-name").title = e.name;   // T37：悬停显示完整文件名（网格截断时）
   bindRowAction(card, e, locked);
@@ -4336,7 +4445,7 @@ function bindLongPress(el, e, locked) {
 }
 
 function enterBulkMode() {
-  if (bulkMode) return;   // T35：分享模式也可进入多选（只读浏览，仅再分享/下载）
+  if (bulkMode) return;   // 已在多选模式：直接返回，避免重复初始化批量条（T35 分享模式进入多选的说明见 bindLongPress）
   bulkMode = true;
   document.querySelectorAll("#fileRows > .list-group-item, #fileRows > .grid-item").forEach(el => {
     el.classList.add("bulk-mode");

@@ -34,6 +34,13 @@
   #viewBody video { max-width: 100%; max-height: 100%; background: #000; border-radius: 8px; }
   /* 图片：大屏 contain + 滚轮缩放 */
   #viewBody .view-img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; transition: transform .1s ease; }
+  /* B5（t13 批次1）：paint() 每次新建渲染容器 #viewC——图片滚轮缩放监听器挂在容器上，
+     重渲染即整体替换容器，监听器随旧节点销毁（不再在持久 #viewBody 上累积）；
+     #viewC 撑满 viewBody 并居中，承接各类型预览内容布局 */
+  #viewC {
+    flex: 1; min-height: 0; width: 100%; height: 100%;
+    display: flex; align-items: center; justify-content: center;
+  }
   /* 文本/代码：全屏滚动 + 大字号 */
   #viewBody .view-text { width: 100%; max-width: 1080px; margin: 0 auto; }
   #viewBody .text-pre, #viewBody .md-code { max-height: none; font-size: 14.5px; background: rgba(255,255,255,.04); border-color: rgba(255,255,255,.1); }
@@ -67,7 +74,7 @@
   <span class="view-title" id="viewTitle">预览</span>
   <span id="viewDl"></span>
   <button class="view-btn" id="viewMaskBtn" type="button">显示明文</button>
-  <a class="view-btn" id="viewClose" href="javascript:window.close()">✕ 关闭</a>
+  <button class="view-btn" id="viewClose" type="button">✕ 关闭</button>
 </div>
 <div id="viewBody"></div>
 
@@ -120,12 +127,23 @@
   var bodyEl = document.getElementById("viewBody");
   var maskBtn = document.getElementById("viewMaskBtn");
   function paint() {
+    // B5：每次新建渲染容器 #viewC 并整体替换——旧容器（含图片滚轮缩放监听器）随节点销毁，
+    // 不再在持久 #viewBody 上重复累积监听器
     bodyEl.innerHTML = "";
-    renderPreview(kind, p, nm, bodyEl);
+    var vc = document.createElement("div");
+    vc.id = "viewC";
+    bodyEl.appendChild(vc);
+    renderPreview(kind, p, nm, vc);
     maskBtn.textContent = previewMask ? "显示明文" : "隐藏敏感信息";
   }
   maskBtn.onclick = function () { previewMask = !previewMask; paint(); };
   paint();
+  // C9（t13 批次1）：关闭按钮去掉 javascript: 协议，改为 button + 事件绑定：
+  // 优先 history.back() 返回上一页；无历史（独立弹窗页）时回退 window.close()
+  document.getElementById("viewClose").onclick = function () {
+    if (history.length > 1) history.back();
+    else { try { window.close(); } catch (e) { /* 忽略 */ } }
+  };
 })();
 </script>
 </body>
