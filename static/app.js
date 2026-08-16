@@ -992,69 +992,6 @@ function strBytes(s) {
 // C4（t13 批次1）：esc 加 null 守卫——null/undefined 按空串处理，不再抛 TypeError
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
-// ==================== T36 敏感信息脱敏（P1：预览页密钥类内容自动打码） ====================
-// 共享函数 maskSensitive(text)：对疑似真实密钥打码（保留前4后4，中间 ****）。
-// 规则：PRIVATE KEY 整块 / 键值式(api_key|secret|password|token=值) / sk- / AKIA / ghp_ / xox。
-// 仅打码"疑似真实密钥"（含数字或足够长度），避免误伤普通文本。
-let previewMask = true;   // 预览默认脱敏；弹窗/独立页切换按钮可临时改为明文
-
-function _maskVal(v, force) {
-  if (force) {
-    // sk-/AKIA/ghp_/xox 等前缀明确是密钥：无条件打码
-    return v.length <= 8 ? "****" : v.slice(0, 4) + "****" + v.slice(-4);
-  }
-  // 键值形式：仅打码疑似真实密钥（含数字，或足够长 ≥16 无数字）
-  if (v.length < 8) return v;
-  const likelyKey = /\d/.test(v) || v.length >= 16;
-  if (!likelyKey) return v;
-  return v.length <= 8 ? "****" : v.slice(0, 4) + "****" + v.slice(-4);
-}
-
-let _maskRules = null;
-function _maskRulesInit() {
-  if (_maskRules) return _maskRules;
-  _maskRules = [
-    // 1) PEM 私钥整块 → 占位模板（[\s\S]*? 可跨换行）
-    { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
-      fn: () => "-----BEGIN PRIVATE KEY-----\n****（已脱敏）\n-----END PRIVATE KEY-----" },
-    // 2) 键值形式：key = value（只打码值部分；键名可出现在标识符中段如 my_api_key；
-    //    值可带单双引号，打码时保留引号）
-    { re: /(^|[^A-Za-z0-9])(api[_-]?key|secret|passwd|password|token|access[_-]?token|auth[_-]?token)(\s*[:=]\s*)(["']?)([A-Za-z0-9._~+\/=-]{8,})(["']?)/gi,
-      fn: (m, pre, key, sep, q1, val, q2) => pre + key + sep + q1 + _maskVal(val, false) + q2 },
-    // 3) OpenAI sk-
-    { re: /\bsk-([A-Za-z0-9_-]{16,})/g, fn: (m, v) => "sk-" + _maskVal(v, true) },
-    // 4) AWS AKIA
-    { re: /\bAKIA([0-9A-Z]{16})/g, fn: (m, v) => "AKIA" + _maskVal(v, true) },
-    // 5) GitHub PAT ghp_
-    { re: /\bghp_([A-Za-z0-9]{20,})/g, fn: (m, v) => "ghp_" + _maskVal(v, true) },
-    // 6) Slack xoxb/xoxa/xoxp/xoxr/xoxs
-    { re: /\bxox[baprs]-([A-Za-z0-9-]{10,})/g, fn: (m, v) => "xox" + m[3] + "-" + _maskVal(v, true) },
-  ];
-  return _maskRules;
-}
-
-// 快速预检：文本不含任何可疑前缀/关键词时直接返回（避免大文本无谓正则开销）
-function _maybeSensitive(text) {
-  const probes = ["sk-", "akia", "ghp_", "xox", "private key", "api", "secret",
-                  "passwd", "password", "token", "access", "auth"];
-  const low = text.toLowerCase();
-  for (let i = 0; i < probes.length; i++) {
-    if (low.indexOf(probes[i]) >= 0) return true;
-  }
-  return false;
-}
-
-function maskSensitive(text) {
-  if (!text || typeof text !== "string") return text;
-  if (!/\w/.test(text)) return text;                    // 纯符号/空白：跳过
-  if (!_maybeSensitive(text)) return text;               // 快速路径
-  let out = text;
-  const rules = _maskRulesInit();
-  for (let i = 0; i < rules.length; i++) {
-    out = out.replace(rules[i].re, rules[i].fn);
-  }
-  return out;
-}
 function isPinned(p) { return pinned.some(x => x.path === p); }
 function dlUrl(p) { return BASE + "dl?path=" + encodeURIComponent(p); }
 
@@ -1281,12 +1218,10 @@ async function renderTextPreview(path, name, container) {
   container.innerHTML = "";
   const note = document.createElement("div");
   note.className = "mdl-note";
-  note.textContent = "编码: " + j.encoding + (j.truncated ? " · 仅预览前 " + fmtSize(j.read_bytes || strBytes(j.content)) : "") +
-    (previewMask ? " · 敏感信息已打码" : " · 显示明文");
+  note.textContent = "编码: " + j.encoding + (j.truncated ? " · 仅预览前 " + fmtSize(j.read_bytes || strBytes(j.content)) : "");
   container.appendChild(note);
   let text = j.content;
   if (text.length > 400000) text = text.slice(0, 400000);
-  if (previewMask) text = maskSensitive(text);   // T36 敏感信息脱敏
   const holder = document.createElement("div");
   holder.className = "view-text";
   if (j.kind === "markdown") {
@@ -1330,8 +1265,7 @@ async function renderCsvPreview(path, name, container) {
     const isHead = idx === 0;
     html += isHead ? "<thead><tr>" : "<tr>";
     r.forEach(c => {
-      const cell = previewMask ? maskSensitive(c) : c;   // T36 逐单元格脱敏，保持表格结构
-      html += (isHead ? "<th>" : "<td>") + esc(cell) + (isHead ? "</th>" : "</td>");
+      html += (isHead ? "<th>" : "<td>") + esc(c) + (isHead ? "</th>" : "</td>");
     });
     html += isHead ? "</tr></thead>" : "</tr>";
   });
@@ -2860,7 +2794,7 @@ async function showText(path, name) {
     $("txtDl").onclick = () => { location.href = dlUrl(path); };
     return;
   }
-  // T36 敏感信息脱敏：默认打码，paint() 可被切换按钮重渲染
+  // T36 敏感信息脱敏已移除：预览一律显示原文（用户本人访问自己电脑）
   const MAX_PREVIEW = 400000;
   const paint = () => {
     body.innerHTML = "";
@@ -2873,7 +2807,7 @@ async function showText(path, name) {
         ? "，文件共 " + fmtSize(j.total_size) + "，仅预览前 " + fmtSize(shown)
         : "，超过 1MB 的部分已截断";
     }
-    note.textContent = noteTxt + (previewMask ? " · 敏感信息已打码" : " · 显示明文");
+    note.textContent = noteTxt;
     body.appendChild(note);
     // 预览上限：超大内容只渲染前 400KB，避免一次性插入巨文本长时间布局卡死主线程
     let text = j.content;
@@ -2892,7 +2826,6 @@ async function showText(path, name) {
       dl.onclick = () => { location.href = dlUrl(path); };
       bigNote.appendChild(dl);
     }
-    if (previewMask) text = maskSensitive(text);
     const holder = document.createElement("div");
     if (j.kind === "markdown") {
       holder.innerHTML = renderMarkdown(text);
@@ -2929,13 +2862,6 @@ async function showText(path, name) {
     }
     const btns = document.createElement("div");
     btns.className = "d-flex flex-wrap gap-2 mt-3";
-    const tg = document.createElement("button");
-    tg.type = "button";
-    tg.className = "btn btn-outline-secondary btn-sm";
-    tg.textContent = previewMask ? "显示明文" : "隐藏敏感信息";
-    tg.title = previewMask ? "敏感信息（密钥等）已打码，点击查看原文" : "已显示明文，点击恢复脱敏";
-    tg.onclick = () => { previewMask = !previewMask; paint(); };
-    btns.appendChild(tg);
     btns.appendChild(mkBtn(icon("download", 14) + " 下载", () => { location.href = dlUrl(path); }));
     body.appendChild(btns);
     addFsButton(body, name, path, dlUrl(path), path);
@@ -5181,7 +5107,7 @@ async function showCsv(path, name) {
     $("csvDl").onclick = () => { location.href = dlUrl(path); };
     return;
   }
-  // T36 敏感信息脱敏：逐单元格打码（保持表格结构），默认脱敏，可切换
+  // T36 敏感信息脱敏已移除：CSV 预览一律显示原文
   const MAX_ROWS = 2000;
   const paint = () => {
     body.innerHTML = "";
@@ -5194,7 +5120,7 @@ async function showCsv(path, name) {
         ? "，文件共 " + fmtSize(j.total_size) + "，仅预览前 " + fmtSize(shown)
         : "，超过 1MB 的部分已截断";
     }
-    note.textContent = noteTxt + (previewMask ? " · 敏感信息已打码" : " · 显示明文");
+    note.textContent = noteTxt;
     body.appendChild(note);
     // 大 CSV：只解析前 300KB、最多渲染前 2000 行，避免一次性解析 + 构建巨表阻塞主线程
     let text = j.content;
@@ -5214,8 +5140,7 @@ async function showCsv(path, name) {
       const isHead = idx === 0;
       html += isHead ? "<thead><tr>" : "<tr>";
       r.forEach(c => {
-        const cell = previewMask ? maskSensitive(c) : c;
-        html += (isHead ? "<th>" : "<td>") + esc(cell) + (isHead ? "</th>" : "</td>");
+        html += (isHead ? "<th>" : "<td>") + esc(c) + (isHead ? "</th>" : "</td>");
       });
       html += isHead ? "</tr></thead>" : "</tr>";
     });
@@ -5224,13 +5149,6 @@ async function showCsv(path, name) {
     body.appendChild(wrap);
     const btns = document.createElement("div");
     btns.className = "d-flex flex-wrap gap-2 mt-3";
-    const tg = document.createElement("button");
-    tg.type = "button";
-    tg.className = "btn btn-outline-secondary btn-sm";
-    tg.textContent = previewMask ? "显示明文" : "隐藏敏感信息";
-    tg.title = previewMask ? "敏感信息（密钥等）已打码，点击查看原文" : "已显示明文，点击恢复脱敏";
-    tg.onclick = () => { previewMask = !previewMask; paint(); };
-    btns.appendChild(tg);
     btns.appendChild(mkBtn(icon("download", 14) + " 下载", () => { location.href = dlUrl(path); }));
     body.appendChild(btns);
     addFsButton(body, name, path, dlUrl(path), path);

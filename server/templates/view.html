@@ -73,7 +73,6 @@
 <div class="view-top">
   <span class="view-title" id="viewTitle">预览</span>
   <span id="viewDl"></span>
-  <button class="view-btn" id="viewMaskBtn" type="button">显示明文</button>
   <button class="view-btn" id="viewClose" type="button">✕ 关闭</button>
 </div>
 <div id="viewBody"></div>
@@ -125,7 +124,6 @@
   // 渲染（kind 由 URL 或 fileKind 推断）
   var kind = q.get("kind") || fileKind(p);
   var bodyEl = document.getElementById("viewBody");
-  var maskBtn = document.getElementById("viewMaskBtn");
   function paint() {
     // B5：每次新建渲染容器 #viewC 并整体替换——旧容器（含图片滚轮缩放监听器）随节点销毁，
     // 不再在持久 #viewBody 上重复累积监听器
@@ -134,9 +132,7 @@
     vc.id = "viewC";
     bodyEl.appendChild(vc);
     renderPreview(kind, p, nm, vc);
-    maskBtn.textContent = previewMask ? "显示明文" : "隐藏敏感信息";
   }
-  maskBtn.onclick = function () { previewMask = !previewMask; paint(); };
   paint();
   // C9（t13 批次1）：关闭按钮去掉 javascript: 协议，改为 button + 事件绑定：
   // 优先 history.back() 返回上一页；无历史（独立弹窗页）时回退 window.close()
