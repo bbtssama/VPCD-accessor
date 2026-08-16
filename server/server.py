@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import calendar
-import cgi
 import ctypes
 import datetime
 import email.utils
@@ -45,6 +44,16 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+# H-6 护栏：cgi 在 Python 3.13（PEP 594）已被移除，给出明确引导而非裸 ModuleNotFoundError
+try:
+    import cgi
+except ModuleNotFoundError:
+    sys.stderr.write(
+        "当前 Python %d.%d 已移除标准库 cgi（PEP 594）。"
+        "请使用 Python 3.10-3.12，或 pip install legacy-cgi 后重试。\n"
+        % sys.version_info[:2])
+    raise
 
 try:
     from cryptography import x509
@@ -99,7 +108,14 @@ _state: dict = {"server": None, "roots": [], "port": None, "token": None, "pinne
 # 持久化到 CERT_DIR/shares.json（写临时文件再 rename，防止写坏）。
 SHARES_FILE = os.path.join(CERT_DIR, "shares.json")
 _shares: dict = {}  # token -> {"root": abs, "is_dir": bool, "expires_at": float, "created_at": float, "name": str}
+# M1：分享表全局锁——创建/过期清理/持久化都在请求线程内执行，需串行化防竞态
+_shares_lock = threading.RLock()
 _SHARE_ALLOWED_HOURS = (1, 24, 72, 168)
+# M13：Windows 保留设备名（上传文件名清洗用；"CON.txt" 等扩展名变形按主名截断比对）
+_WIN_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {"COM%d" % i for i in range(1, 10)}
+    | {"LPT%d" % i for i in range(1, 10)})
 
 # ---------------------------------------------------------------------- 前端
 
@@ -136,12 +152,22 @@ class _DriveHandler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ helpers
 
+    def _send_common_headers(self, html=False):
+        """M14：统一安全响应头——全部响应注入 nosniff + Referrer-Policy（token 在 URL，
+        防 Referer 外泄/嗅探混淆），HTML 页面追加 X-Frame-Options 防点击劫持。
+        CSP 按 t19 裁决后置：需前端全流程实测后再上线。"""
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        if html:
+            self.send_header("X-Frame-Options", "DENY")
+
     def _send_json(self, obj, code=200):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -151,6 +177,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers(html=True)
         self.end_headers()
         self.wfile.write(data)
 
@@ -160,6 +187,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers(html=True)
         self.end_headers()
         self.wfile.write(data)
 
@@ -231,6 +259,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.send_header("ETag", etag)
         self.send_header("Last-Modified", last_mod)
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers()
         self.end_headers()
         self.wfile.write(data)
 
@@ -251,6 +280,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers(html=True)
         self.end_headers()
         self.wfile.write(data)
 
@@ -292,6 +322,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                         "Content-Disposition",
                         "attachment; filename*=UTF-8''" + urllib.parse.quote(name or os.path.basename(path)),
                     )
+                self._send_common_headers()
                 self.end_headers()
                 shutil.copyfileobj(fh, self.wfile)
                 return
@@ -328,6 +359,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
                     "Content-Disposition",
                     "attachment; filename*=UTF-8''" + urllib.parse.quote(name or os.path.basename(path)),
                 )
+            self._send_common_headers()
             self.end_headers()
             fh.seek(start)
             remaining = chunk
@@ -1001,15 +1033,16 @@ class _DriveHandler(BaseHTTPRequestHandler):
             if expires_at <= now:
                 self._send_json({"error": "父分享已过期，无法二次分享"}, 403)
                 return
-            _shares[new_tok] = {
-                "root": p,
-                "is_dir": os.path.isdir(p),
-                # T35：继承父分享的 expires_at（钳制后），父过期则子也视为过期
-                "expires_at": expires_at,
-                "created_at": now,
-                "name": os.path.basename(p) or p,
-                "parent": tok,
-            }
+            with _shares_lock:
+                _shares[new_tok] = {
+                    "root": p,
+                    "is_dir": os.path.isdir(p),
+                    # T35：继承父分享的 expires_at（钳制后），父过期则子也视为过期
+                    "expires_at": expires_at,
+                    "created_at": now,
+                    "name": os.path.basename(p) or p,
+                    "parent": tok,
+                }
             _save_shares()
             self._send_json({
                 "ok": True,
@@ -1085,6 +1118,7 @@ class _DriveHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        self._send_common_headers(html=True)
         self.end_headers()
         self.wfile.write(data)
 
@@ -1270,21 +1304,23 @@ class _DriveHandler(BaseHTTPRequestHandler):
                     return
                 tok = secrets.token_urlsafe(9)
                 now = time.time()
-                # 顺带清理已过期的分享，防止过期 token 无限累积
-                expired = [k for k, v in _shares.items() if now > v["expires_at"]]
-                for k in expired:
-                    _shares.pop(k, None)
-                _shares[tok] = {
-                    "root": "",
-                    "files": files,
-                    "is_dir": False,
-                    "expires_at": now + hours * 3600,
-                    "created_at": now,
-                    "name": "收藏分享(%d 个)" % len(files),   # T36：置顶→收藏 文案统一
-                    "multi": True,
-                    "virtual": True,
-                    "nodes": _build_virtual_nodes(files),
-                }
+                # M1：创建/过期清理在锁内串行化，防止并发创建互踩或字典并发修改
+                with _shares_lock:
+                    # 顺带清理已过期的分享，防止过期 token 无限累积
+                    expired = [k for k, v in _shares.items() if now > v["expires_at"]]
+                    for k in expired:
+                        _shares.pop(k, None)
+                    _shares[tok] = {
+                        "root": "",
+                        "files": files,
+                        "is_dir": False,
+                        "expires_at": now + hours * 3600,
+                        "created_at": now,
+                        "name": "收藏分享(%d 个)" % len(files),   # T36：置顶→收藏 文案统一
+                        "multi": True,
+                        "virtual": True,
+                        "nodes": _build_virtual_nodes(files),
+                    }
                 _save_shares()
                 self._send_json({
                     "ok": True,
@@ -1311,17 +1347,19 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 return
             tok = secrets.token_urlsafe(9)
             now = time.time()
-            # 顺带清理已过期的分享，防止过期 token 无限累积
-            expired = [k for k, v in _shares.items() if now > v["expires_at"]]
-            for k in expired:
-                _shares.pop(k, None)
-            _shares[tok] = {
-                "root": p,
-                "is_dir": os.path.isdir(p),
-                "expires_at": now + hours * 3600,
-                "created_at": now,
-                "name": os.path.basename(p) or p,
-            }
+            # M1：创建/过期清理在锁内串行化
+            with _shares_lock:
+                # 顺带清理已过期的分享，防止过期 token 无限累积
+                expired = [k for k, v in _shares.items() if now > v["expires_at"]]
+                for k in expired:
+                    _shares.pop(k, None)
+                _shares[tok] = {
+                    "root": p,
+                    "is_dir": os.path.isdir(p),
+                    "expires_at": now + hours * 3600,
+                    "created_at": now,
+                    "name": os.path.basename(p) or p,
+                }
             _save_shares()
             self._send_json({
                 "ok": True,
@@ -1354,6 +1392,10 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 self._send_error_page("证书读取失败", str(exc))
         elif route == "/api/certp12":
             # 小米等 Android 安装 CA 证书要求含私钥的 .p12，现场打包私钥+证书
+            # H-5 快速版：含私钥的 p12 仅 HTTPS 提供，明文 HTTP 一律拒绝（避免局域网嗅探）
+            if not isinstance(self.connection, ssl.SSLSocket):
+                self._send_json({"error": "请使用 https:// 地址下载证书"}, 403)
+                return
             if not os.path.isfile(CERT_FILE) or not os.path.isfile(KEY_FILE):
                 self._send_error_page("证书不存在", str(CERT_FILE))
                 return
@@ -1488,6 +1530,11 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 self._send_json({"error": "paths 必须是字符串数组"}, 400)
                 return
             mode = body.get("mode") or "normal"
+            # H-1 路由层根校验：任一路径不可解析（越界/非法）整体 403，与 /dlzip 语义一致
+            for p in paths:
+                if not isinstance(p, str) or self._resolve(p) is None:
+                    self._send_json({"error": "包含无效路径: %s" % p}, 403)
+                    return
             task, err = _archive_new_task(paths, mode)
             if err is not None:
                 self._send_json(err, 429 if err.get("queue_full") else 400)
@@ -1500,12 +1547,15 @@ class _DriveHandler(BaseHTTPRequestHandler):
             if task is None:
                 self._send_json({"error": "任务不存在"}, 404)
                 return
-            with task["lock"]:
-                if task["state"] in ("queued", "scanning", "compressing", "downloading"):
-                    task["cancel_evt"].set()
-                else:
-                    # ready/done/failed/aborted：终态直接删任务 + 临时文件
-                    _archive_delete_task(task)
+            # M2：先取全局任务表锁再取任务锁（锁序：表锁→任务锁，与
+            # _archive_dl/_archive_poll_cleanup 完全一致），消除 pop 与持锁迭代并发竞态
+            with _ARCHIVE_TASKS_LOCK:
+                with task["lock"]:
+                    if task["state"] in ("queued", "scanning", "compressing", "downloading"):
+                        task["cancel_evt"].set()
+                    else:
+                        # ready/done/failed/aborted：终态直接删任务 + 临时文件
+                        _archive_delete_task(task)
             self._send_json({"ok": True})
             return
         if route != "/api/upload":
@@ -1537,6 +1587,14 @@ class _DriveHandler(BaseHTTPRequestHandler):
                 except (UnicodeEncodeError, UnicodeDecodeError):
                     pass
             name = os.path.basename(fname) or "file"
+            # M13：清洗 Windows 文件名——切掉 ADS 冒号、去首尾空白/尾随点，并拒绝
+            # Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含 "CON.txt" 变形），
+            # 防止隐蔽写入备用数据流或落到设备文件。清洗后为空则回退 "file"。
+            name = name.split(":", 1)[0].strip().rstrip(". ")
+            if name.split(".", 1)[0].upper() in _WIN_RESERVED_NAMES:
+                name = ""
+            if not name:
+                name = "file"
             dest = os.path.join(target, name)
             try:
                 with open(dest, "wb") as fh:
@@ -3647,11 +3705,15 @@ def _load_shares() -> None:
 
 def _save_shares() -> None:
     """把分享表写回磁盘（写临时文件再 rename，防止中途写坏导致数据丢失）。"""
+    # M1：锁内取快照后释放锁再写盘——并发 dump 互踩与"dump 期间字典被改"的
+    # RuntimeError 均消除；缩短持锁时间，避免写盘阻塞分享请求线程。
+    with _shares_lock:
+        snap = dict(_shares)
     try:
         os.makedirs(CERT_DIR, exist_ok=True)
         tmp = SHARES_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(_shares, fh, ensure_ascii=False)
+            json.dump(snap, fh, ensure_ascii=False)
         os.replace(tmp, SHARES_FILE)
     except OSError:
         pass
@@ -4057,6 +4119,15 @@ def _dl_tar(handler, archive, entry, disp):
         handler._send_error_page("解压失败", str(exc))
 
 
+def _drain_stream(stream) -> None:
+    """排空管道直到 EOF；M11 stderr drain 用——防止写端缓冲填满阻塞子进程。"""
+    try:
+        while stream.read(1 << 16):
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _dl_7z(handler, archive, entry, disp, tool):
     """7-Zip 条目下载：先查 size 设置 Content-Length，再 7z e -so 流式输出。"""
     size, is_dir = _seven_entry_size(tool, archive, entry)
@@ -4070,6 +4141,10 @@ def _dl_7z(handler, archive, entry, disp, tool):
     except Exception as exc:  # noqa: BLE001
         handler._send_error_page("解压失败", str(exc))
         return
+    # M11：独立 daemon 线程排空 stderr——损坏包会让 7z 连续输出警告，填满管道缓冲
+    # （Windows 约 4KB）后写端阻塞 → stdout 停止产出 → 主循环永久挂起。
+    stderr_drain = threading.Thread(target=_drain_stream, args=(proc.stderr,), daemon=True)
+    stderr_drain.start()
     if size is not None:
         handler.send_response(200)
         handler.send_header("Content-Type", "application/octet-stream")
@@ -4097,7 +4172,8 @@ def _dl_7z(handler, archive, entry, disp, tool):
         except Exception:  # noqa: BLE001
             pass
         try:
-            proc.stderr.read()
+            # M11：等 drain 线程读完 stderr（进程退出后即 EOF 自动结束）
+            stderr_drain.join(timeout=10)
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -4143,6 +4219,11 @@ def _dl_winrar(handler, archive, entry, disp, tool):
 def _unpack_download(handler, archive, entry):
     """下载压缩包内的单个条目：zip/tar 标准库流式；rar/7z 走 7-Zip/WinRAR。"""
     fmt = _archive_fmt(archive)
+    # H-4 快速护栏：拒绝 CLI 开关/通配符/@listfile/路径穿越/空 entry（精确白名单版随 P1）
+    if (not entry or entry.startswith(("-", "@")) or "*" in entry or "?" in entry
+            or ".." in entry.replace("\\", "/").split("/")):
+        handler._send_json({"error": "压缩包内没有该条目"}, 403)
+        return
     disp = "attachment; filename*=UTF-8''" + urllib.parse.quote(os.path.basename(entry) or "file")
     if fmt == "zip":
         _dl_zip(handler, archive, entry, disp)
@@ -4532,15 +4613,17 @@ def _archive_sweep_tmp():
         pass
 
 
-def _archive_new_task(paths, mode):
+def _archive_new_task(paths, mode, roots=None):
     """创建后台打包任务并启动工人线程；返回 (task, None) 或 (None, err)。
 
     paths: 源路径列表（dict 去重保序）；mode: store|fast|normal（非法回退 normal）。
+    roots: 允许打包的根目录列表（缺省取 _state["roots"]）；越界路径记入 skipped 不打包。
     排队上限：queued+scanning+compressing ≥ _ARCHIVE_QUEUE_MAX 时拒绝（429 由路由处理）。
     """
     _archive_poll_cleanup()
-    # 校验：去重保序 + 存在性过滤（不存在的路径记入 skipped，不终止整体）
-    abs_paths = []
+    roots = roots if roots is not None else _state["roots"]
+    # 校验：去重保序 + 根校验 + 存在性过滤（不存在/越界路径记入 skipped，不终止整体）
+    abs_paths, out_of_root, seen = [], [], set()
     for p in paths or []:
         if not isinstance(p, str) or not p.strip():
             continue
@@ -4548,8 +4631,14 @@ def _archive_new_task(paths, mode):
             ap = os.path.realpath(p.strip())
         except Exception:  # noqa: BLE001
             ap = p.strip()
-        if ap not in abs_paths:
-            abs_paths.append(ap)
+        if ap in seen:
+            continue
+        seen.add(ap)
+        # H-1 函数层防御（防未来新调用点绕过）：超出允许根目录的路径跳过不打包
+        if roots and not any(_under(root, ap) for root in roots):
+            out_of_root.append({"path": ap, "reason": "超出允许的根目录"})
+            continue
+        abs_paths.append(ap)
     if not abs_paths:
         return (None, {"error": "没有可打包的文件"})
     not_exist = []
@@ -4583,7 +4672,7 @@ def _archive_new_task(paths, mode):
             "current_file": "",
             "file_total": 0,
             "file_done": 0,
-            "skipped": not_exist,
+            "skipped": not_exist + out_of_root,
             "error": None,
             "temp": None,
             "dl_total_bytes": 0,
@@ -4792,8 +4881,11 @@ def _archive_dl(handler, task):
             task["state"] = "done"
     except _ArchiveAborted:
         # 用户主动取消下载：任务直接删除（响应已开始，连接由浏览器关闭承继）
-        with task["lock"]:
-            _archive_delete_task(task)
+        # M2：持全局表锁再取任务锁（表锁→任务锁，与 cancel 路由/_archive_poll_cleanup
+        # 一致），消除 pop 与持锁迭代并发竞态
+        with _ARCHIVE_TASKS_LOCK:
+            with task["lock"]:
+                _archive_delete_task(task)
     except Exception:  # noqa: BLE001
         # 前端断连等写流异常：回滚 ready 可再下载，bytes_sent 清零；
         # 此时 wfile 已断，无法再写任何响应
@@ -4883,7 +4975,8 @@ def _ensure_cert() -> None:
 
 # 小米/华为等 Android 安装 CA 证书要求 .p12（PKCS#12，必须含私钥），.crt 只含证书会被拒。
 # 此密码用于手机端安装 .p12 时输入，仅在一次性安装自签名证书时使用。
-CERT_P12_PASSWORD = "1234"
+# H-5 快速版：不再固定弱密码，改为每次启动随机生成（CLI 启动输出 / MCP drive_start 返回值都会带出）。
+CERT_P12_PASSWORD = secrets.token_urlsafe(8)
 
 
 def _cert_p12_bytes() -> bytes:
@@ -5048,6 +5141,7 @@ def _start(root, port, token=None):
         "urls_http": _urls_http(port, token),
         "firewall_rule": fw,
         "hint": hint,
+        "p12_password": CERT_P12_PASSWORD,
     }
 
 
@@ -5292,6 +5386,8 @@ def _cli_serve(root, port, token=None):
         print(u + "  (HTTP 免证书明文，与 HTTPS 同端口；手机打不开 https 证书页时把 https:// 改成 http://)", flush=True)
     print("根目录: %s" % ", ".join(info["roots"]), flush=True)
     print("打包格式: %s" % info["archive_format"], flush=True)
+    print("p12 证书密码: %s（手机安装 CA 证书 .p12 时需手动输入；仅 HTTPS 提供下载）"
+          % info["p12_password"], flush=True)
     hint = _system_proxy_hint(port)
     if hint:
         sys.stderr.write(hint + "\n")
