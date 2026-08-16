@@ -9,16 +9,16 @@
 <link rel="stylesheet" href="static/highlight.min.css">
 <style>
   /* ========== 品牌色变量层 ==========
-     克制基调：#60a5fa 柔和浅蓝（primary）+ #f3f4f6 灰（页面底），与收藏面板头部观感一致。
+     克制基调：#2563eb 品牌蓝（primary）+ #f3f4f6 灰（页面底），与收藏面板头部观感一致。
      组件颜色一律由 --brand-* 派生为 Bootstrap 语义变量（--bs-*），
      按钮 / badge / progress / text-muted / 边框因此整体统一；
      浅色 / 深色模式只翻变量层，组件样式零改动。 */
   :root {
     /* 品牌基础色（primary/success/info/warning/danger + subtle/emphasis 变体） */
-    --brand-primary: #3b82f6;
-    --brand-primary-rgb: 59, 130, 246;
+    --brand-primary: #2563eb;
+    --brand-primary-rgb: 37, 99, 235;
     --brand-primary-subtle: #dbeafe;
-    --brand-primary-emphasis: #2563eb;
+    --brand-primary-emphasis: #1d4ed8;
     --brand-success: #16a34a;
     --brand-success-rgb: 22, 163, 74;
     --brand-success-subtle: #dcfce7;
@@ -565,8 +565,8 @@
 
   /* ==================== T7 视觉大升级：肉眼可见的现代感与品牌感 ==================== */
   :root {
-    --brand-grad-from: #60a5fa;   /* 品牌渐变起点（导航 / 主按钮 / 活动胶囊）- 柔和但清晰 */
-    --brand-grad-to: #3b82f6;     /* 品牌渐变终点 - 中等蓝 */
+    --brand-grad-from: #2563eb;   /* 品牌渐变起点（导航 / 主按钮 / 活动胶囊）- 深一档保证白字对比 */
+    --brand-grad-to: #1d4ed8;     /* 品牌渐变终点 - 更深蓝 */
     --brand-card-shadow: 0 4px 16px rgba(15, 23, 42, .08), 0 1px 3px rgba(15, 23, 42, .06);   /* 卡片浮起阴影（双层更立体） */
     --brand-card-border: 1px solid var(--bs-border-color);   /* 卡片清晰描边，消除虚感 */
     --brand-card-radius: 16px;    /* 卡片大圆角 */
@@ -711,13 +711,13 @@
     --brand-text-2: var(--brand-text-muted);
     --brand-text-3: #9ca3af;
     /* 强调色（橙）：仅星标/收藏等点缀使用，蓝保持主色地位 */
-    --brand-accent: #f5a623;
+    --brand-accent: #d97706;
   }
   @media (prefers-color-scheme: dark) {
     :root { --brand-text-3: #64748b; }
   }
 
-  /* 1) 星标统一：收藏 #f5a623、未收藏 #ccc（替代散落的 #d97706/#d1d5db） */
+  /* 1) 星标统一：收藏 #d97706、未收藏 #ccc */
   .star, .grid-star { color: #ccc; }
   .star.on, .grid-star.on { color: var(--brand-accent); }
 
@@ -948,11 +948,11 @@
 
   <!-- 工具栏：导航（后退/前进）+ 面包屑（横向滚动）+ 刷新/视图切换（窄屏图标化腾出面包屑宽度） -->
   <div class="d-flex align-items-center gap-2 mb-2">
-    <button id="navBack" class="nav-icon-btn flex-shrink-0" title="后退" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
-    <button id="navFwd" class="nav-icon-btn flex-shrink-0" title="前进" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
+    <button id="navBack" class="nav-icon-btn flex-shrink-0" title="后退" aria-label="后退" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg></button>
+    <button id="navFwd" class="nav-icon-btn flex-shrink-0" title="前进" aria-label="前进" disabled><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-3px"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg></button>
     <div id="breadcrumb" class="d-flex align-items-center overflow-x-auto text-nowrap flex-grow-1 py-1"></div>
-    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> 刷新</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span></button>
-    <button id="viewBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="视图与筛选"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> 筛选</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span></button>
+    <button id="refreshBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" aria-label="刷新"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg> 刷新</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></span></button>
+    <button id="viewBtn" class="btn btn-outline-secondary btn-sm flex-shrink-0" title="视图与筛选" aria-label="视图与筛选"><span class="d-none d-sm-inline"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg> 筛选</span><span class="d-inline d-sm-none"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg></span></button>
   </div>
 
   <div id="alert" class="alert alert-danger py-2 mb-2 d-none"></div>
