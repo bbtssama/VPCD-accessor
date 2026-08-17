@@ -2035,12 +2035,17 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   // t12（幽灵播放）：自动播放前置守卫——弹窗已隐藏/未显示或视频已脱离 DOM 时禁止 v.play()。
   // 排查发现：弹窗关闭后若 body 未立即清空，v.isConnected 恒为 true，残留异步回调（转码轮询
-  // ready、loadedmetadata、MSE sourceopen）可能再次 v.play() 于隐藏弹窗里 → 只有声音无画面。
-  // 守卫按「未 disposed + 仍在 DOM + modal 可见」三条件拦截，作为 stopStream/清空 body 的兜底。
+  // t12（幽灵播放）：自动播放前置守卫——弹窗已隐藏/视频已脱离 DOM 时禁止 v.play()。
+  // 注意不能用 modal.classList.contains("show") 作判据：Bootstrap modal 的 show class 是
+  // 异步加上的（openModal 调 show() 后要等 transition），首次基于用户手势的自动播放会在 show
+  // class 尚未加上时执行，依赖它会把自动播放误拦（点视频却不播）。改用「video 是否仍在 modal
+  // DOM 内」判据：仍在 = 弹窗未关闭/未清理，放行；被 stopMedia/清空/关闭后 v 脱离 modal
+  //（或 detached、disposed）则拦截——异步 play 晚于关闭总是因 detached 被拦。
   function canAutoPlay() {
     if (disposed || !v.isConnected) return false;
     const m = document.getElementById("appModal");
-    return !!(m && m.classList.contains("show"));
+    if (!m) return false;
+    try { return m.contains(v); } catch (e) { return false; }
   }
 
   // 原生模式播放并（可选）恢复播放位置：切换 src 会让浏览器重新加载媒体（闪烁不可避免），
