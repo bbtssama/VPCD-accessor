@@ -997,6 +997,7 @@ function dlUrl(p) { return BASE + "dl?path=" + encodeURIComponent(p); }
 
 // 按扩展名分类文件类型（与后端 preview 保持一致）
 const VIDEO_EXT = ["mp4","webm","ogv","ogg","m4v","mov","mkv","avi","ts","flv"];
+const AUDIO_EXT = ["mp3","flac","wav","m4a","ogg","aac","opus","wma","ape"];   // t13：音频在线播放（与后端 _AUDIO_EXT 对齐，宽集免遗漏）
 const IMAGE_EXT = ["jpg","jpeg","png","gif","webp","bmp","svg","ico","tif","tiff","avif","heic"];
 const MD_EXT = ["md","markdown"];
 const TEXT_EXT = ["txt","log","json","js","ts","jsx","tsx","py","java","c","cpp","h","hpp","cs","go","rs","php","rb","sh","bat","ps1","html","htm","css","scss","xml","yaml","yml","toml","ini","conf","cfg","csv","sql","env","gitignore"];  // svg 已移出：归图片预览
@@ -1008,11 +1009,13 @@ function extOf(name) {
 function fileKind(name) {
   const e = extOf(name);
   if (VIDEO_EXT.indexOf(e) >= 0) return "video";
+  if (AUDIO_EXT.indexOf(e) >= 0) return "audio";   // t13：音频在线播放（此前兜底 other 只有下载面板）
   if (IMAGE_EXT.indexOf(e) >= 0) return "image";   // 图片优先（svg 原在 TEXT_EXT，现归图片预览）
   if (MD_EXT.indexOf(e) >= 0) return "markdown";
   if (e === "csv") return "csv";
   if (e === "pdf") return "pdf";
   if (e === "lnk") return "lnk";
+  if (["doc","docx","ppt","pptx"].indexOf(e) >= 0) return "doc";   // t9 整改：fileKind 此前漏 doc 映射（兜底 other），导致 renderPreview/previewFile/bindRowAction 的 doc 分支全是死代码
   if (TEXT_EXT.indexOf(e) >= 0) return "text";
   if (ARCHIVE_EXT.indexOf(e) >= 0) return "archive";
   return "other";
@@ -1075,6 +1078,10 @@ $("appModal").addEventListener("hidden.bs.modal", () => {
   if (_activePreviewAbort) { _activePreviewAbort.abort(); _activePreviewAbort = null; }
   $("appModalBody").querySelectorAll("video,audio").forEach(stopMedia);
   _runPreviewCleanup();   // B6：弹窗关闭统一 revoke Blob URL（含 <track> removeTrack）
+  // t12（幽灵播放）：清空弹窗内容——否则 hidden 的 modal 里 video 元素仍在 DOM，
+  // v.isConnected 恒为 true，showVideo 残留的转码轮询/MSE pump/loadedmetadata 回调会继续跑，
+  // 转码就绪或重设 src 后 v.play() 在"看不见的弹窗"里播放（只有声音）。清空后上述异步守卫真正失效。
+  $("appModalBody").innerHTML = "";
   modalState = null;
   try { localStorage.removeItem("drive.modal"); } catch (e) { /* localStorage 禁用时忽略 */ }
   // 用户点 ❌ 关闭时把之前 push 的 history 条目退掉，保持历史栈一致；
@@ -1091,6 +1098,15 @@ window.addEventListener("popstate", (e) => {
     appModal.hide();
   }
 });
+// t12（幽灵播放）：切后台标签页 / 页面隐藏时暂停弹窗内所有媒体（pause 不清 src，
+// 切回后进度保留可继续播放；防止"前台无弹窗仍有声音"）。打包轮询的 visibilitychange 另有处理。
+function pauseModalMedia() {
+  document.querySelectorAll("#appModalBody video, #appModalBody audio").forEach(el => {
+    try { el.pause(); } catch (e) { /* 忽略 */ }
+  });
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) pauseModalMedia(); });
+window.addEventListener("pagehide", pauseModalMedia);
 function mkBtn(label, fn) {
   const b = document.createElement("button");
   b.className = "btn btn-primary";
@@ -1198,11 +1214,13 @@ function addFsButton(body, title, path, downloadUrl, detailPath) {
 // ==================== T18 独立预览页渲染（/view 页面复用；弹窗版 show* 保持稳定不动） ====================
 function renderPreview(kind, path, name, container) {
   if (kind === "video") return renderVideoPreview(path, name, container);
+  if (kind === "audio") return renderAudioPreview(path, name, container);   // t13：音频在线播放
   if (kind === "image") return renderImagePreview(path, name, container);
   if (kind === "pdf") return renderPdfPreview(path, name, container);
   if (kind === "csv") return renderCsvPreview(path, name, container);
   if (kind === "archive") return renderUnpackPreview(path, name, container);
   if (kind === "text" || kind === "markdown") return renderTextPreview(path, name, container);
+  if (kind === "doc") return renderTextPreview(path, name, container);   // t9：doc/docx/ppt/pptx 复用文本预览（后端返回 {kind:"text", content:…}）
   if (kind === "detail") return renderDetailPreview(path, name, container);
   container.innerHTML = '<p class="muted">暂不支持预览该类型</p>';
   return null;
@@ -1372,6 +1390,19 @@ function renderVideoPreview(path, name, container) {
   container.appendChild(wrap);
   v.src = BASE + "api/stream?path=" + encodeURIComponent(path);
   v.onerror = () => { container.innerHTML = '<p class="muted">视频加载失败或不可播放</p>'; };
+}
+
+// 音频（独立页：原生控件 + Range 流，深色大屏沉浸，与视频预览同款壳）
+function renderAudioPreview(path, name, container) {
+  container.innerHTML = "";
+  const a = document.createElement("audio");
+  a.controls = true;
+  a.preload = "metadata";
+  a.style.width = "100%";
+  a.style.maxWidth = "480px";
+  container.appendChild(a);
+  a.src = BASE + "api/stream?path=" + encodeURIComponent(path);   // 后端 api/stream 支持 Range，大文件自动分段
+  a.onerror = () => { container.innerHTML = '<p class="muted">音频加载失败或格式不受支持</p>'; };
 }
 
 // 文本分片渲染：把大文本按 chunkLen 逐块 append 到目标元素，块间 setTimeout(0) 让出主线程，
@@ -1598,7 +1629,7 @@ function showVideo(path, name) {
   }
   // ---- 控制条：画质 / 免证书 / 缓存下载 / 字幕 ----
   const ctrl = document.createElement("div");
-  ctrl.className = "d-flex flex-wrap align-items-center gap-2 mb-2 small";
+  ctrl.className = "d-flex flex-wrap align-items-center video-ctrl mb-2 small";   // P0 #10：间距/对齐由 .video-ctrl CSS 统一控制
   const qSel = document.createElement("select");
   qSel.className = "form-select form-select-sm flex-shrink-0";
   [["original", "原画"], ["high", "高清"], ["medium", "标清"], ["low", "低清"]].forEach(item => {
@@ -1608,18 +1639,22 @@ function showVideo(path, name) {
   });
   qSel.value = "original";
   const wrapSel = document.createElement("span");
-  wrapSel.className = "d-flex align-items-center gap-1 flex-shrink-0";
+  wrapSel.className = "qwrap";   // P0 #10：flex-shrink:0 + white-space:nowrap，杜绝「画」「质」折行竖排
   wrapSel.appendChild(document.createTextNode("画质"));
   wrapSel.appendChild(qSel);
   const mseChk = mkCheck("免证书(MSE)", false);
   const cacheChk = mkCheck("缓存下载", false);
   const subChk = mkCheck("字幕", false);
   const asrChk = mkCheck("识别", false);
+  // P0 #10：复选框收进 .video-chks 组——手机端 2×2 网格、统一左缘、label 行高 44px（CSS 控制）
+  const chkBox = document.createElement("div");
+  chkBox.className = "video-chks";
+  chkBox.appendChild(mseChk.el);
+  chkBox.appendChild(cacheChk.el);
+  chkBox.appendChild(subChk.el);
+  chkBox.appendChild(asrChk.el);
   ctrl.appendChild(wrapSel);
-  ctrl.appendChild(mseChk.el);
-  ctrl.appendChild(cacheChk.el);
-  ctrl.appendChild(subChk.el);
-  ctrl.appendChild(asrChk.el);
+  ctrl.appendChild(chkBox);
   body.appendChild(ctrl);
   // ---- 视频容器（无 .video-play 覆盖按钮，播放/暂停交给原生 controls） ----
   const wrap = document.createElement("div");
@@ -1664,7 +1699,8 @@ function showVideo(path, name) {
   const prev = document.createElement("div");
   prev.className = "video-preview";
   prev.style.display = "none";
-  let prevW = 160;   // 预览图宽度（滑动/停止均为 160px；备用变量，防止 ReferenceError）
+  // P0 #8：预览图宽度——移动端（≤575.98px）96px 宽适应竖屏，桌面 160px（备用变量，防止 ReferenceError）
+  let prevW = (window.innerWidth && window.innerWidth <= 575.98) ? 96 : 160;
   const prevImg = document.createElement("img");
   prevImg.alt = "";
   prev.appendChild(prevImg);
@@ -1997,6 +2033,16 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
 
   function showErr(msg) { errTip.style.display = "block"; errTip.textContent = msg; }
 
+  // t12（幽灵播放）：自动播放前置守卫——弹窗已隐藏/未显示或视频已脱离 DOM 时禁止 v.play()。
+  // 排查发现：弹窗关闭后若 body 未立即清空，v.isConnected 恒为 true，残留异步回调（转码轮询
+  // ready、loadedmetadata、MSE sourceopen）可能再次 v.play() 于隐藏弹窗里 → 只有声音无画面。
+  // 守卫按「未 disposed + 仍在 DOM + modal 可见」三条件拦截，作为 stopStream/清空 body 的兜底。
+  function canAutoPlay() {
+    if (disposed || !v.isConnected) return false;
+    const m = document.getElementById("appModal");
+    return !!(m && m.classList.contains("show"));
+  }
+
   // 原生模式播放并（可选）恢复播放位置：切换 src 会让浏览器重新加载媒体（闪烁不可避免），
   // 但保持 currentTime 可避免"跳回开头"的额外突兀感。
   function playResume(resume) {
@@ -2005,12 +2051,12 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         v.removeEventListener("loadedmetadata", onLoaded);
         v.removeAttribute("poster");   // 清除切换前的定格帧（画面已恢复）；poster="" 会被当相对 URL
         try { if (Math.abs(v.currentTime - resume) > 1) v.currentTime = resume; } catch (e) { /* 忽略 */ }
-        v.play().catch(() => { /* 用户手势后静默 */ });
+        if (canAutoPlay()) v.play().catch(() => { /* 用户手势后静默 */ });   // t12：弹窗已关则不再自动播放
       };
       v.addEventListener("loadedmetadata", onLoaded);
     } else {
       v.removeAttribute("poster");   // 无位置恢复：直接清除定格帧
-      v.play().catch(() => { /* 用户手势后静默 */ });
+      if (canAutoPlay()) v.play().catch(() => { /* 用户手势后静默 */ });   // t12：弹窗已关则不再自动播放
     }
   }
 
@@ -2277,7 +2323,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         });
         pump();
         // 勾选 MSE 后自动开始播放（startMse 原无 v.play，用户需再点一次播放才会动）
-        try { v.play().catch(() => { /* autoplay 策略拒绝时静默，用户可手动点播放 */ }); } catch (e) { /* 忽略 */ }
+        // t12：sourceopen 可能晚于弹窗关闭（异步），加 canAutoPlay 守卫防隐藏弹窗播放
+        if (canAutoPlay()) { try { v.play().catch(() => { /* autoplay 策略拒绝时静默，用户可手动点播放 */ }); } catch (e) { /* 忽略 */ } }
       } catch (e) {
         showErr("MSE 初始化失败: " + e.message);
       }
@@ -2368,7 +2415,8 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
         });
         pump();
         // 切画质/seek 重建后自动恢复播放（buildMse 原无 v.play，重建后视频会停在暂停态）
-        try { v.play().catch(() => { /* autoplay 策略拒绝时静默 */ }); } catch (e) { /* 忽略 */ }
+        // t12：sourceopen 可能晚于弹窗关闭（异步），加 canAutoPlay 守卫防隐藏弹窗播放
+        if (canAutoPlay()) { try { v.play().catch(() => { /* autoplay 策略拒绝时静默 */ }); } catch (e) { /* 忽略 */ } }
       } catch (e) { /* 忽略 */ }
     });
     if (subChk.input.checked && subVtt) { subMode = "overlay"; setupSubOverlay(); }
@@ -2617,9 +2665,11 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     const img = prevImg;
     const idx = Math.max(0, Math.min(strip.n - 1, Math.floor((t / strip.dur) * strip.n)));
     img.style.objectFit = "none";
-    img.style.width = prevW + "px";                    // 单块窗口（滑动 160 / 停止 320）
+    img.style.width = prevW + "px";                    // 单块窗口（移动 96 / 桌面 160）
     img.style.height = previewRatio ? (prevW * previewRatio) + "px" : "";
-    img.style.objectPosition = (-idx * prevW) + "px 0"; // 像素级对齐到第 idx 块
+    // P0 #8：objectPosition 按「源块宽 160px」（后端缩略图条每块固定宽度）偏移，
+    // 再以 (160-prevW)/2 居中可视窗口——移动端 96px 窗口下仍精确对齐第 idx 块，不会跨块错位
+    img.style.objectPosition = (-(idx * 160 + (160 - prevW) / 2)) + "px 0";
     img.src = strip.url;
   }
   // 统一入口：clientX → rel → 秒 → 显示预览
@@ -2632,9 +2682,12 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
       || (strip ? strip.dur : 0);
     const t = rel * dur;
     if (strip) showStripFrame(t); else showSingleFrame(Number.isFinite(t) ? t : 0);
+    // P0 #8：缩略图未就绪（src 空/首帧未解码/加载失败 naturalWidth=0）时不显示浮层，
+    // 避免透明底白边空框透出下层视频画面；已解码过任一帧则沿用旧帧继续显示
+    if (!prevImg.complete || !prevImg.naturalWidth) { hidePreview(); return; }
     // 预览图跟随鼠标位置：显示在拖动点上方（top 约 8px 悬于进度条上），
     // left 居中于鼠标点，但钳制在 wrap 边界内避免超出屏幕
-    const pw = 160;
+    const pw = prevW;                                 // P0 #8：与浮层图宽一致（移动 96 / 桌面 160）
     const margin = 4;
     let left = clientX - rect.left - pw / 2;                    // 鼠标点居中
     left = Math.max(margin, Math.min(rect.width - pw - margin, left));   // 左右边界钳制
@@ -2654,6 +2707,10 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
     wrap.addEventListener("pointermove", (e) => { if (e.clientX != null) onPreviewMove(e.clientX); });
     wrap.addEventListener("pointerdown", hidePreview);
     wrap.addEventListener("pointerleave", hidePreview);
+    // P0 #8：触摸设备 PointerEvent 分支下 pointerleave 配对不可靠，补 touchend/touchcancel 兜底隐藏，
+    // 防止缩略图浮层在拖动结束后残留
+    wrap.addEventListener("touchend", hidePreview);
+    wrap.addEventListener("touchcancel", hidePreview);
   } else {
     wrap.addEventListener("mousemove", (e) => { onPreviewMove(e.clientX); });
     wrap.addEventListener("mouseleave", hidePreview);
@@ -2680,10 +2737,11 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
   if (subChk.input.checked) loadSubtitle();
 
   // B6：注册本预览清理函数——弹窗关闭（hidden.bs.modal）或切换其它预览（openModal）时统一执行：
-  // revoke subVtt/asrVtt/strip/MSE 的全部 Blob URL，并同步 removeTrack 释放 <track> 引用。
+  // stopStream（停 MSE/转码轮询/清 src）→ removeTrack → revoke 全部 Blob URL。
   // 顺序保障：hidden.bs.modal / openModal 均先 stopMedia（清 v.src）再执行本清理。
   _activePreviewCleanup = () => {
     disposed = true;
+    try { stopStream(); } catch (e) { /* 忽略 */ }   // t12：彻底停 MSE 流+转码轮询+清 v.src/load，杜绝关闭后残留回调再次 play
     try { removeTrack(); } catch (e) { /* 忽略 */ }
     blobUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) { /* 忽略 */ } });
     blobUrls.length = 0;
@@ -3099,6 +3157,7 @@ async function init() {
     try { st = JSON.parse(m); } catch (e) { /* 损坏则忽略 */ }
     if (st && st.type && st.path) {
       if (st.type === "video") showVideo(st.path, st.name || "");
+      else if (st.type === "audio") showAudio(st.path, st.name || "");   // t13：音频弹窗刷新恢复
       else if (st.type === "text") showText(st.path, st.name || "");
       else if (st.type === "detail") showDetail(st.path, st.name || "");
       else if (st.type === "unpack") showUnpack(st.path, st.name || "");
@@ -3329,6 +3388,7 @@ function entryKindMatch(e, key) {
   const k = e.meta && e.meta.kind;
   switch (key) {
     case "video": return k === "video";
+    case "audio": return k === "audio";   // t11：音乐筛选（后端 _meta_kind 音频返回 "audio"，见 server.py _AUDIO_EXT/_meta_kind）
     case "text": return k === "text";
     case "code": return k === "code";
     case "exe": return k === "exe";
@@ -3750,6 +3810,10 @@ function updateSortLabel() {
       o.text = labels[DEFAULT_SORT_DIR[o.value] > 0 ? 1 : 0]; // 非当前项显示其默认方向
     }
   }
+  // t11：方向按钮图标随当前方向联动（↑=升序 sortDir>0，↓=降序 sortDir<0）。
+  // 放这里可被所有改动方向/排序的路径（sortDirBtn/桌面重选反转/change/reset/初始化）统一刷新。
+  const db = $("sortDirBtn");
+  if (db) db.textContent = (sortDir > 0) ? "↑" : "↓";
 }
 // 条目比较器（目录永远排前，不随方向翻转）：sortEntries（全量）与模糊插入二分（单点）共用，
 // 保证渐进插入的模糊命中条目与同步渲染结果按同一规则排序。
@@ -4002,6 +4066,15 @@ $("sortSelect").addEventListener("change", () => {
   updateSortLabel();
   renderEntries();
 });
+// t11：方向切换按钮（双端统一入口）——原生 select 在触摸设备上点开系统选择器，
+// 不派发 mousedown、重选当前项也不触发 click，导致桌面"重选反转"在手机上失效。
+// 独立按钮 ↑/↓ 补上这条路径：点击切换 sortDir 并重渲染，桌面与手机一致可用。
+// 图标表示"当前实际方向"：sortDir>0 = 升序 ↑，sortDir<0 = 降序 ↓（updateSortLabel 内同步）。
+$("sortDirBtn").onclick = () => {
+  sortDir = -sortDir;
+  updateSortLabel();   // 同步 option 文案 + 方向按钮图标
+  renderEntries();
+};
 // 一键重置筛选/排序/搜索
 $("resetFilterBtn").onclick = () => {
   document.querySelectorAll("#typeFilters input[type=checkbox]").forEach(cb => { cb.checked = false; });
@@ -4193,8 +4266,10 @@ function gridItem(e) {
 function previewFile(path, name) {
   const kind = fileKind(name);
   if (kind === "video") showVideo(path, name);
+  else if (kind === "audio") showAudio(path, name);   // t13：音频在线播放
   else if (kind === "image") showImage(path, name);
   else if (kind === "markdown" || kind === "text") showText(path, name);
+  else if (kind === "doc") showText(path, name);   // t9：doc/docx/ppt/pptx 点击走文本预览（与 markdown/text 同路）
   else if (kind === "pdf") showPdf(path, name);
   else if (kind === "csv") showCsv(path, name);
   else if (kind === "archive") showUnpack(path, name);
@@ -4227,10 +4302,14 @@ function bindRowAction(el, e, locked) {
   const kind = fileKind(e.name);
   if (kind === "video") {
     el.onclick = () => showVideo(e.path, e.name);
+  } else if (kind === "audio") {
+    el.onclick = () => showAudio(e.path, e.name);   // t13：音频在线播放
   } else if (kind === "image") {
     el.onclick = () => showImage(e.path, e.name);
   } else if (kind === "markdown" || kind === "text") {
     el.onclick = () => showText(e.path, e.name);
+  } else if (kind === "doc") {
+    el.onclick = () => showText(e.path, e.name);   // t9：doc/docx/ppt/pptx 点击走文本预览（与 markdown/text 同路）
   } else if (kind === "archive") {
     el.onclick = () => showUnpack(e.path, e.name);
   } else if (kind === "pdf") {
@@ -4304,6 +4383,10 @@ function showFileActions(e) {
   if (fileKind(e.name) === "lnk") {
     // T32：.lnk 次要入口——操作面板内可直接查看/跳转快捷方式目标（showLnk 保留）
     row.appendChild(mkOut(icon("link", 15) + " 快捷方式目标", () => showLnk(e.path, e.name)));
+  }
+  if (fileKind(e.name) === "audio") {
+    // t13：音频操作面板提供在线播放入口（右键/详情路径也能播，不只靠列表点击）
+    row.appendChild(mkOut(icon("play", 15) + " 播放", () => showAudio(e.path, e.name)));
   }
   if (SHARE_MODE) {
     // T35：分享模式只读浏览 —— 无收藏/置顶；分享 = 二次分享（与父分享同步过期）
@@ -5226,6 +5309,31 @@ function showImage(path, name) {
   btns.appendChild(mkBtn(icon("download", 14) + " 下载", () => { location.href = dlUrl(path); }));
   body.appendChild(btns);
   img.src = BASE + "api/img?path=" + encodeURIComponent(path);
+}
+
+// 音频在线播放（t13）：弹窗内原生 <audio controls autoplay>，src 用 api/stream（后端支持 Range，
+// 大文件自动分段加载）；关闭时由 openModal/hidden.bs.modal 的 stopMedia 兜底暂停+清 src。
+function showAudio(path, name) {
+  const body = document.createElement("div");
+  openModal(name, body, { type: "audio", path, name });
+  const a = document.createElement("audio");
+  a.controls = true;
+  a.preload = "metadata";
+  a.autoplay = true;   // 点击打开（用户手势）→ 浏览器放行自动播放
+  a.style.width = "100%";
+  body.appendChild(a);
+  const tip = document.createElement("div");
+  tip.className = "small text-muted mt-2";
+  tip.textContent = "音频在线播放（原生控件）";
+  body.appendChild(tip);
+  a.onerror = () => {
+    // 加载失败：错误提示 + 下载查看（与文本/CSV 的失败分支同款）
+    body.innerHTML = '<p class="muted">音频加载失败或格式不受支持</p>' +
+      '<div class="d-flex flex-wrap gap-2 mt-3"><button class="btn btn-primary" id="audDl">' +
+      icon("download", 14) + " 下载</button></div>";
+    $("audDl").onclick = () => { location.href = dlUrl(path); };
+  };
+  a.src = BASE + "api/stream?path=" + encodeURIComponent(path);
 }
 
 // ---------------- 功能 5：.lnk 快捷方式跳转（跳到目标位置而非直接打开） ----------------

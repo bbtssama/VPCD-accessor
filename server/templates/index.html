@@ -316,11 +316,19 @@
   .video-err { display: none; color: var(--bs-danger); font-size: 13px; margin-top: 8px; line-height: 1.8; white-space: pre-wrap; }
   /* 转码等待提示（原生模式转码档 409 轮询期间显示） */
   .video-tip { display: none; text-align: center; color: var(--bs-secondary-color); font-size: 13px; padding: 6px 0; }
-  /* 进度条预览浮层（缩略图条 / 单帧） */
+  /* 进度条预览浮层（缩略图条 / 单帧）——P0 #8：补深色底 + 白边，
+     缩略图未就绪/加载中时不再以透明空框透出下层视频画面 */
   .video-preview { position: absolute; z-index: 5;
-                   background: transparent; border: 1px solid rgba(255,255,255,.5); border-radius: 6px;
-                   overflow: hidden; pointer-events: none; }   /* 无黑底：半透明透出视频画面不显暗 */
+                   background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.6); border-radius: 6px;
+                   overflow: hidden; pointer-events: none; }
   .video-preview img { display: block; height: 90px; opacity: 1; filter: brightness(1.1); transition: opacity .15s ease, filter .15s ease; }   /* 停止后清晰+提亮 1.1；滑动时 JS 置 0.4 无滤镜 */
+  /* 画质/选项控制条（P0 #10）：统一 32px 高、对齐一致、画质标签不折行、复选框组 2×2 网格 */
+  .video-ctrl { align-items: center; row-gap: 8px; column-gap: 16px; }
+  .video-ctrl .qwrap { flex-shrink: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  .video-ctrl .form-select { min-height: 32px; width: auto; }
+  .video-chks { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 8px; }
+  .video-chks .form-check { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; margin: 0; padding-left: 0; }
+  .video-chks .form-check-input { accent-color: #2563eb; flex-shrink: 0; }
   /* 字幕覆盖层（MSE 模式用自定义 overlay 显示字幕） */
   .video-sub { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; z-index: 4;
                color: #fff; font-size: 15px; line-height: 1.5; text-shadow: 0 1px 3px #000;
@@ -423,7 +431,7 @@
   /* P1 详情/预览弹窗高度管理：正文区 max-height + 内部滚动，避免底部内容被截断 */
   #appModal .modal-dialog { max-height: calc(100vh - 30px); }
   #appModal .modal-content { max-height: inherit; display: flex; flex-direction: column; }
-  #appModal .modal-body { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  #appModal .modal-body { overflow-y: auto; -webkit-overflow-scrolling: touch; min-height: 0; }   /* P0 #9：flex 列子项 min-height:0，内部滚动才不把 dialog 撑出视口 */
   .detail-tbl { width: 100%; table-layout: auto; }
   .detail-tbl td.k { white-space: nowrap; padding-right: 1.4em; vertical-align: top; }
   .detail-tbl td.v { word-break: break-word; overflow-wrap: anywhere; padding-right: 12px; }
@@ -437,6 +445,13 @@
   @media (max-width: 575.98px) {
     #appModal .modal-body { padding-bottom: 26px; }
     .detail-tbl td.k { padding-right: 1em; }
+    /* P0 #9：修手机弹窗底部 23px 条带漏底——modal-fullscreen-sm-down 应占满视口，
+       不被上方 .modal-dialog max-height: calc(100vh-30px) 掐出底缝 */
+    #appModal .modal-dialog { max-height: 100vh; max-height: 100dvh; }
+    /* P0 #10：复选框组 2×2 网格、统一左缘，label 行高 44px、勾选框 22×22px */
+    .video-chks { flex: 1 1 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 16px; row-gap: 6px; }
+    .video-chks .form-check { min-height: 44px; display: flex; align-items: center; gap: 8px; margin: 0; }
+    .video-chks .form-check-input { width: 22px; height: 22px; }
   }
   /* 网格视图（大图标，类似 Windows 文件管理器） */
   #fileRows.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; padding: 8px; }
@@ -1099,6 +1114,7 @@
       <label class="form-label small fw-semibold mb-1">类型筛选（多选）</label>
       <div class="d-flex flex-wrap gap-1 mb-2" id="typeFilters">
         <label class="type-chip"><input type="checkbox" data-type="video"> 视频</label>
+        <label class="type-chip"><input type="checkbox" data-type="audio"> 音乐</label>
         <label class="type-chip"><input type="checkbox" data-type="text"> 文本</label>
         <label class="type-chip"><input type="checkbox" data-type="code"> 编程</label>
         <label class="type-chip"><input type="checkbox" data-type="exe"> 软件包</label>
@@ -1110,11 +1126,14 @@
     </div>
     <div class="mb-3">
       <label class="form-label small fw-semibold mb-1" for="sortSelect">排序</label>
-      <select id="sortSelect" class="form-select form-select-sm">
-        <option value="mtime">修改时间（新 → 旧）</option>
-        <option value="name">名称（本地化）</option>
-        <option value="size">大小（大 → 小）</option>
-      </select>
+      <div class="d-flex align-items-center gap-1">
+        <select id="sortSelect" class="form-select form-select-sm flex-grow-1">
+          <option value="mtime">修改时间（新 → 旧）</option>
+          <option value="name">名称（本地化）</option>
+          <option value="size">大小（大 → 小）</option>
+        </select>
+        <button type="button" id="sortDirBtn" class="btn btn-outline-secondary btn-sm px-2 flex-shrink-0" title="切换排序方向">⇅</button>
+      </div>
     </div>
   </div>
   <div class="sidebar-foot p-3 border-top">
