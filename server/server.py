@@ -1865,6 +1865,8 @@ _MD_EXT = {"md", "markdown"}
 _PDF_EXT = {"pdf"}
 _LNK_EXT = {"lnk"}
 _ARCHIVE_EXT = {"zip", "rar", "7z", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz"}
+# t8：Office 文档族——零依赖文本预览（docx/pptx 走 zip 内 XML；doc/ppt 走 OLE2 启发式）
+_OFFICE_TEXT_EXT = {"doc", "docx", "ppt", "pptx"}
 _SYSTEM_NOISE = {"dumpstack.log", "dumpstack.log.tmp", "hiberfil.sys",
                  "pagefile.sys", "swapfile.sys"}
 
@@ -1884,6 +1886,8 @@ def _preview_kind(path):
         return "csv"
     if ext in _TEXT_EXT:
         return "text"
+    if ext in _OFFICE_TEXT_EXT:
+        return "text"  # t8：doc/docx/ppt/pptx 零依赖文本预览
     if ext in _ARCHIVE_EXT:
         return "archive"
     if ext in _LNK_EXT:
@@ -2245,7 +2249,7 @@ def _meta_kind(ext):
         return "exe", _MIME_BY_EXT.get(ext)
     if ext in _CODE_EXT:
         return "code", _MIME_BY_EXT.get(ext)
-    if ext in _PLAIN_TEXT_EXT:
+    if ext in _PLAIN_TEXT_EXT or ext in _OFFICE_TEXT_EXT:
         return "text", _MIME_BY_EXT.get(ext)
     return "other", None
 
@@ -2401,6 +2405,35 @@ def _looks_binary(raw):
     return bool(raw) and (_has_binary_magic(raw) or raw.count(b"\x00") / len(raw) > 0.03)
 
 
+def _looks_encrypted_binary(raw):
+    """t7"加密/私有二进制"可读性判据：可打印 ASCII 比例极低 + 高位字节占比高，
+    且 UTF-8 严格解码读不通、按 GBK 也无法读通（替换符密集）。用于拦截无魔数、
+    无空字节、却完全不像文本的加密/私有格式（如被加密的 Intercept.log），避免
+    latin-1 兜底输出乱码。真实文本（utf-8/gbk/big5）总能按某编码读通，不受影响；
+    BOM/UTF-16 由上层先分流。"""
+    if not raw or len(raw) < 32:
+        return False
+    n = len(raw)
+    printable = sum(1 for b in raw if 0x20 <= b <= 0x7e)
+    if printable / n >= 0.10:
+        return False
+    high = sum(1 for b in raw if b >= 0x80)
+    if high / n < 0.60:
+        return False
+    try:
+        raw.decode("utf-8")  # 能按 UTF-8 严格读通 → 真实多语言/中文文本，非加密
+        return False
+    except UnicodeDecodeError:
+        pass
+    try:
+        decoded = raw.decode("gbk", errors="replace")
+    except Exception:  # noqa: BLE001
+        return True
+    if decoded.count("\ufffd") / max(1, len(decoded)) >= 0.05:
+        return True
+    return False
+
+
 def _detect_utf16_nobom(raw):
     """无 BOM UTF-16 启发式。
 
@@ -2446,6 +2479,10 @@ def _smart_decode(raw, fallback_errors="replace"):
         # 跳过 BOM 或 ASCII 前缀（混合编码）后再解码
         start = bom_len if bom_len else u16_start
         return raw[start:].decode(enc_name, errors=fallback_errors), enc_name
+    # t7：无 BOM/UTF-16 特征的加密或私有二进制（高位密集、无文本特征）——
+    # 任何编码都会产出乱码，返回哨兵编码 "binary" 供调用方识别，跳过 latin-1 兜底。
+    if _looks_encrypted_binary(raw):
+        return "", "binary"
     # gbk 优先（大陆主流）；gbk 严格失败时试 big5（繁体）；gb18030 兜底（GBK 超集，全 Unicode）
     for enc in ("utf-8", "gbk", "big5", "gb18030"):
         try:
@@ -2465,6 +2502,157 @@ def _smart_decode(raw, fallback_errors="replace"):
     return raw.decode("latin-1", errors=fallback_errors), "latin-1"
 
 
+# ------------------------------------------------------------------ t8 Office 文本预览
+
+
+_OLE2_HEURISTIC_MAX = 32 * 1024 * 1024  # .doc/.ppt 启发式扫描读取上限（防超大文件拖慢/占内存）
+
+
+def _u16_printable(cp):
+    """UTF-16LE 码元是否疑似可见文本：控制符（\\t\\n\\r 除外）、代理区、私用区、
+    非字符（U+FDD0–FDEF 与 U+FFFE/U+FFFF）、BOM（U+FEFF）、替换符（U+FFFD）均排除——
+    OLE 结构填充常把 0xFFFE/0xFEFF 当占位，不排除会误选入正文区间。"""
+    if cp < 0x20 or 0x7F <= cp <= 0x9F or 0xD800 <= cp <= 0xDFFF:
+        return cp in (0x09, 0x0A, 0x0D)
+    if 0xE000 <= cp <= 0xF8FF:  # 私用区非正文
+        return False
+    if 0xFDD0 <= cp <= 0xFDEF or cp in (0xFEFE, 0xFEFF, 0xFFFD, 0xFFFE, 0xFFFF):
+        # 非字符/分隔符/替换符/BOM——非正文
+        return False
+    return True
+
+
+def _ole2_utf16le_extract(raw):
+    """OLE2 .doc/.ppt 启发式文本提取：以 2 字节为窗口在字节流中找最长的
+    "疑似 UTF-16LE 文本"连续区间（偶数/奇数对齐各扫一遍取最长者），解码该区间。
+    返回 str 或 None（找不到足够长的文本区间视为失败）。"""
+    best = None  # (长度, 起始字节)
+    n = len(raw) - 1
+    for off in (0, 1):  # 文本块可能落在偶数或奇数文件偏移
+        i = off
+        while i < n:
+            if _u16_printable(raw[i] | (raw[i + 1] << 8)):
+                j = i
+                while j < n and _u16_printable(raw[j] | (raw[j + 1] << 8)):
+                    j += 2
+                ln = j - i
+                if best is None or ln > best[0]:
+                    best = (ln, i)
+                i = j + 2
+            else:
+                i += 2
+    if best is None or best[0] < 16:  # 至少 8 个字符才认定为正文
+        return None
+    _, start = best
+    return raw[start:start + best[0]].decode("utf-16le", errors="replace").strip()
+
+
+# 忽略命名空间前缀——t.tag 是带完整 ns 的局部名，用 endswith 判定最稳
+# （wordprocessingml 主命名空间，前缀 w: 只是默认 ns 的别名）
+def _docx_text(zf):
+    """docx → word/document.xml 提取正文文本（ElementTree 解析，忽略 ns 前缀）：
+    w:t 文本、w:tab→制表、w:br/w:cr→换行、w:p 段落结束→换行。"""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(zf.read("word/document.xml"))
+    paragraphs = []
+    for p in root.iter():
+        if not p.tag.endswith("}p"):
+            continue
+        parts = []
+        for node in p.iter():
+            tag = node.tag
+            if tag.endswith("}t"):
+                parts.append(node.text or "")
+            elif tag.endswith("}tab"):
+                parts.append("\t")
+            elif tag.endswith("}br") or tag.endswith("}cr"):
+                parts.append("\n")
+        text = "".join(parts).strip()
+        if text:
+            paragraphs.append(text)
+    return "\n".join(paragraphs)
+
+
+def _pptx_text(zf):
+    """pptx → ppt/slides/slideN.xml 提取正文文本（drawingml 命名空间 a:）：
+    a:t 文本、a:tab→制表、a:br/a:p 结束→换行；幻灯片按编号排序、加分隔。"""
+    import xml.etree.ElementTree as ET
+    names = [n for n in zf.namelist()
+             if re.match(r"^ppt/slides/slide\d+\.xml$", n)]
+
+    def _slide_no(n):
+        m = re.search(r"(\d+)", n.rsplit("/", 1)[-1])
+        return int(m.group(1)) if m else 0
+
+    names.sort(key=_slide_no)
+    out = []
+    for n in names:
+        root = ET.fromstring(zf.read(n))
+        parts = []
+        for node in root.iter():
+            tag = node.tag
+            if tag.endswith("}t"):
+                parts.append(node.text or "")
+            elif tag.endswith("}tab"):
+                parts.append("\t")
+            elif tag.endswith("}br"):
+                parts.append("\n")
+            elif tag.endswith("}p"):
+                parts.append("\n")
+        text = "".join(parts).strip()
+        if text:
+            out.append("--- 幻灯片 %d ---\n%s" % (_slide_no(n), text))
+    return "\n\n".join(out)
+
+
+def _read_office_text(path, ext, limit):
+    """t8 零依赖 Office 文本预览。成功返回与 _read_text 同构的响应 dict；
+    非 Office 结构/无可提取文本返回 None，交由 _read_text 原有二进制拦截流程。"""
+    name = os.path.basename(path) or path
+    total = os.path.getsize(path)
+    content = None
+    encoding = None
+    notice = None
+    if ext in ("docx", "pptx"):
+        try:
+            with zipfile.ZipFile(path) as zf:
+                content = _docx_text(zf) if ext == "docx" else _pptx_text(zf)
+        except (zipfile.BadZipFile, KeyError, OSError, ValueError, NotImplementedError, RuntimeError):
+            return None
+        if not content:
+            return None
+        encoding = "utf-8"
+    else:  # doc / ppt：OLE2 启发式 UTF-16LE
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read(min(total, _OLE2_HEURISTIC_MAX))
+        except OSError:
+            return None
+        content = _ole2_utf16le_extract(raw)
+        if not content:
+            return None
+        encoding = "utf-16le"
+        notice = ("提示：.%s 为 OLE2 复合文档，这是按 UTF-16LE 做的启发式文本提取，"
+                  "尽量还原正文，可能与实际排版/嵌入内容存在差异。" % ext)
+    full_len = len(content)
+    truncated = full_len > limit
+    if truncated:
+        content = content[:limit]
+    out = {
+        "name": name,
+        "kind": "text",
+        "encoding": encoding,
+        "content": content,
+        "truncated": truncated,
+        "truncated_bytes": (full_len - limit) if truncated else 0,
+        "total_size": total,
+        "read_bytes": total,
+    }
+    if notice:
+        out["notice"] = notice
+    return out
+
+
 def _read_text(path, limit=1024 * 1024):
     """读取文本文件前 limit 字节；BOM / 无 BOM UTF-16 优先，否则 utf-8 → gbk → latin-1 逐级解码。
     伪装成 .txt/.csv/.md 的二进制文件（xlsx/zip/图片等）返回明确错误而非乱码。"""
@@ -2478,6 +2666,12 @@ def _read_text(path, limit=1024 * 1024):
     if truncated:
         raw = raw[:limit]
     name = os.path.basename(path) or path
+    # t8：Office 文档族文本预览——docx/pptx（zip 内 XML）与 doc/ppt（OLE2 启发式）
+    # 必须先于 _has_binary_magic（PK 魔数会把 docx/pptx 当 zip 二进制拦截）
+    if ext in _OFFICE_TEXT_EXT:
+        office = _read_office_text(path, ext, limit)
+        if office is not None:
+            return office
     # 编码识别顺序：BOM → 二进制魔数 → 无 BOM UTF-16 → 空字节比例 → utf-8/gbk/latin-1
     enc_name, bom_len = _detect_bom(raw)
     if not enc_name:
@@ -2512,6 +2706,15 @@ def _read_text(path, limit=1024 * 1024):
     else:
         # 无 BOM / 非 UTF-16：utf-8 → gbk → gb18030 → latin-1（gb18030 兼容繁体）
         content, encoding = _smart_decode(raw)
+        if encoding == "binary":
+            # t7：_smart_decode 判定为加密/私有二进制（原拉丁兜底只会输出乱码）
+            return {
+                "name": name,
+                "kind": "binary",
+                "error": "该文件疑似加密或私有二进制格式，无法文本预览",
+                "total_size": os.path.getsize(path),
+                "read_bytes": len(raw),
+            }
     return {
         "name": name,
         "kind": kind,
