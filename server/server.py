@@ -2746,7 +2746,8 @@ def _read_office_text(path, ext, limit):
         content = content[:limit]
     out = {
         "name": name,
-        "kind": "text",
+        "kind": "markdown",  # t20：Office 提取结果含 Markdown（docx/xlsx 表格、pptx 幻灯片分隔），
+        #  必须用 markdown kind 前端才会走 renderMarkdown（唯一渲染表格的路径）；t8 曾用 text→表格以原文显示
         "encoding": encoding,
         "content": content,
         "truncated": truncated,

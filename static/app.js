@@ -1015,7 +1015,7 @@ function fileKind(name) {
   if (e === "csv") return "csv";
   if (e === "pdf") return "pdf";
   if (e === "lnk") return "lnk";
-  if (["doc","docx","ppt","pptx"].indexOf(e) >= 0) return "doc";   // t9 整改：fileKind 此前漏 doc 映射（兜底 other），导致 renderPreview/previewFile/bindRowAction 的 doc 分支全是死代码
+  if (["doc","docx","ppt","pptx","xls","xlsx"].indexOf(e) >= 0) return "doc";   // t9/t20：doc 族含 xls/xlsx（此前漏 xls/xlsx 落 other，预览面板变纯下载）
   if (TEXT_EXT.indexOf(e) >= 0) return "text";
   if (ARCHIVE_EXT.indexOf(e) >= 0) return "archive";
   return "other";
