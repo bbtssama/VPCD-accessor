@@ -3311,9 +3311,15 @@ function renderPinned() {
       '<span class="flex-shrink-0">' + (p.is_dir ? typeIcon("folder", 18) : fileIcon(p.name, 18)) + "</span>" +
       '<span class="pname flex-grow-1 text-truncate">' + esc(p.name) + "</span>" +
       '<span class="psize text-muted small flex-shrink-0 d-none d-sm-block">' + fmtSize(p.size) + "</span>" +
+      '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="loc" title="跳到所在目录">' + icon("fwd", 14) + '<span class="d-none d-sm-inline"> 跳转</span></button>' +
       '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="share" title="分享">' + icon("share", 14) + '<span class="d-none d-sm-inline"> 分享</span></button>' +
       '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="dl" title="下载">' + icon("download", 14) + '<span class="d-none d-sm-inline"> 下载</span></button>' +
       '<button class="btn btn-outline-secondary btn-sm flex-shrink-0" data-a="unpin" title="取消收藏">' + icon("close", 14) + '<span class="d-none d-sm-inline"> 取消</span></button>';
+    row.querySelector('[data-a="loc"]').onclick = () => {
+      // t17：跳到收藏项所在目录并关闭收藏面板——目录项直接进自己，文件项进其父目录
+      loadList(p.is_dir ? p.path : dirnameOf(p.path));
+      closePinPanel();
+    };
     row.querySelector('[data-a="share"]').onclick = () => showShareDialog(p.path, p.name);
     row.querySelector('[data-a="dl"]').onclick = () => { location.href = dlUrl(p.path); };
     row.querySelector('[data-a="unpin"]').onclick = async () => {
