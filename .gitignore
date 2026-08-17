@@ -16,3 +16,6 @@ dist/
 
 # Playwright 自动化测试残留（控制台日志/页面快照）
 .playwright-mcp/
+
+# AgentTeams 团队运行状态（会话间数据，非项目源码）
+.agent-teams/
