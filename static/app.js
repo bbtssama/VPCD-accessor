@@ -5326,6 +5326,14 @@ function showAudio(path, name) {
   tip.className = "small text-muted mt-2";
   tip.textContent = "音频在线播放（原生控件）";
   body.appendChild(tip);
+  // 详情入口：音乐文件点击即播，但详情/分享等操作仍需可达（与视频播放器同款布局）
+  const acts = document.createElement("div");
+  acts.className = "d-flex flex-wrap gap-2 mt-3";
+  const detailBtn = mkBtn(icon("info", 14) + " 详情", () => { showDetail(path, name); });
+  const dlBtn = mkBtn(icon("download", 14) + " 下载", () => { location.href = dlUrl(path); });
+  acts.appendChild(detailBtn);
+  acts.appendChild(dlBtn);
+  body.appendChild(acts);
   a.onerror = () => {
     // 加载失败：错误提示 + 下载查看（与文本/CSV 的失败分支同款）
     body.innerHTML = '<p class="muted">音频加载失败或格式不受支持</p>' +
