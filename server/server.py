@@ -45,15 +45,12 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# H-6 护栏：cgi 在 Python 3.13（PEP 594）已被移除，给出明确引导而非裸 ModuleNotFoundError
+# cgi 已不再被使用（t18 已改为流式 multipart 解析）。Python 3.13（PEP 594）移除了标准库 cgi，
+# 这里实现非致命降级：有则导入（兼容旧版），无则置 None，保证 3.10-3.13 全部可无依赖启动。
 try:
-    import cgi
-except ModuleNotFoundError:
-    sys.stderr.write(
-        "当前 Python %d.%d 已移除标准库 cgi（PEP 594）。"
-        "请使用 Python 3.10-3.12，或 pip install legacy-cgi 后重试。\n"
-        % sys.version_info[:2])
-    raise
+    import cgi  # noqa: F401
+except ModuleNotFoundError:  # pragma: no cover
+    cgi = None
 
 try:
     from cryptography import x509
@@ -1569,39 +1566,12 @@ class _DriveHandler(BaseHTTPRequestHandler):
         if "multipart/form-data" not in ctype:
             self._send_json({"error": "需要 multipart/form-data"}, 400)
             return
-        form = cgi.FieldStorage(
-            fp=self.rfile, headers=self.headers,
-            environ={"REQUEST_METHOD": "POST", "CONTENT_TYPE": ctype},
-        )
-        saved, errors = [], []
-        for field in form.list or []:
-            fname = getattr(field, "filename", None)
-            if not fname:
-                continue
-            # 修复浏览器中文文件名可能出现的编码错乱：UTF-8 浏览器 → utf-8；GBK 浏览器 → gbk
-            try:
-                fname = fname.encode("latin-1").decode("utf-8")
-            except (UnicodeEncodeError, UnicodeDecodeError):
-                try:
-                    fname = fname.encode("latin-1").decode("gbk")
-                except (UnicodeEncodeError, UnicodeDecodeError):
-                    pass
-            name = os.path.basename(fname) or "file"
-            # M13：清洗 Windows 文件名——切掉 ADS 冒号、去首尾空白/尾随点，并拒绝
-            # Windows 保留设备名（CON/PRN/AUX/NUL/COM1-9/LPT1-9，含 "CON.txt" 变形），
-            # 防止隐蔽写入备用数据流或落到设备文件。清洗后为空则回退 "file"。
-            name = name.split(":", 1)[0].strip().rstrip(". ")
-            if name.split(".", 1)[0].upper() in _WIN_RESERVED_NAMES:
-                name = ""
-            if not name:
-                name = "file"
-            dest = os.path.join(target, name)
-            try:
-                with open(dest, "wb") as fh:
-                    shutil.copyfileobj(field.file, fh)
-                saved.append(name)
-            except OSError as exc:
-                errors.append({"name": name, "error": str(exc)})
+        # t18：弃用 cgi.FieldStorage（3.13 移除 + 二进制大文件解析不可靠），改流式 multipart
+        try:
+            saved, errors = _parse_and_save_upload(self.rfile, ctype, target)
+        except ValueError as exc:
+            self._send_json({"error": str(exc)}, 400)
+            return
         self._send_json({"saved": saved, "errors": errors, "dir": target})
 
     def handle_one_request(self):  # noqa: D401
@@ -1865,8 +1835,8 @@ _MD_EXT = {"md", "markdown"}
 _PDF_EXT = {"pdf"}
 _LNK_EXT = {"lnk"}
 _ARCHIVE_EXT = {"zip", "rar", "7z", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz"}
-# t8：Office 文档族——零依赖文本预览（docx/pptx 走 zip 内 XML；doc/ppt 走 OLE2 启发式）
-_OFFICE_TEXT_EXT = {"doc", "docx", "ppt", "pptx"}
+# t8/t19：Office 文档族——零依赖文本预览（docx/pptx/xlsx 走 zip 内 XML；doc/ppt/xls 走 OLE2 启发式）
+_OFFICE_TEXT_EXT = {"doc", "docx", "ppt", "pptx", "xls", "xlsx"}
 _SYSTEM_NOISE = {"dumpstack.log", "dumpstack.log.tmp", "hiberfil.sys",
                  "pagefile.sys", "swapfile.sys"}
 
@@ -2549,28 +2519,157 @@ def _ole2_utf16le_extract(raw):
 
 # 忽略命名空间前缀——t.tag 是带完整 ns 的局部名，用 endswith 判定最稳
 # （wordprocessingml 主命名空间，前缀 w: 只是默认 ns 的别名）
+
+
+def _xml_lines(node):
+    """取一个 XML 节点内的文本行（w:p/a:p 层语义）：返回 [行, ...]。
+    统一处理 w:t/a:t（文本）、w:tab（制表）、w:br/w:cr（软换行）、段落（w:p/a:p 结束）。"""
+    lines = [""]
+    for n in node.iter():
+        tag = n.tag
+        if tag.endswith("}t"):
+            lines[-1] += (n.text or "")
+        elif tag.endswith("}tab"):
+            lines[-1] += "\t"
+        elif tag.endswith("}br") or tag.endswith("}cr"):
+            lines.append("")
+        elif tag.endswith("}p"):
+            lines.append("")
+    # 去掉首尾空行
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return [ln.strip() for ln in lines if ln is not None]
+
+
+def _md_escape_cell(text):
+    """Markdown 单元格文本清洗：把内部换行/多空白折叠成空格，转义管道符避免破坏表格。"""
+    text = " ".join(str(text).split())
+    return text.replace("|", "\\|")
+
+
 def _docx_text(zf):
-    """docx → word/document.xml 提取正文文本（ElementTree 解析，忽略 ns 前缀）：
-    w:t 文本、w:tab→制表、w:br/w:cr→换行、w:p 段落结束→换行。"""
+    """docx → word/document.xml：按 body 顺序输出段落文本与 w:tbl 表格（Markdown 表格）。
+    段落间换行；表格渲染为 `| 列1 | 列2 |` + 表头分隔行 + 各数据行。"""
     import xml.etree.ElementTree as ET
     root = ET.fromstring(zf.read("word/document.xml"))
-    paragraphs = []
-    for p in root.iter():
-        if not p.tag.endswith("}p"):
+    body = root  # 兜底：下面按文档顺序收集，body 标签实际为 {…}body
+    for el in root.iter():
+        if el.tag.endswith("}body"):
+            body = el
+            break
+    out = []
+    for block in body:  # body 直接子元素按文档顺序：w:p / w:tbl / w:sectPr…
+        if block.tag.endswith("}p"):
+            lines = _xml_lines(block)
+            if lines:
+                out.append("\n".join(lines))
+        elif block.tag.endswith("}tbl"):
+            rows, ncols = [], 0
+            for tr in block.iter():
+                if not tr.tag.endswith("}tr"):
+                    continue
+                cells = []
+                for tc in tr:
+                    if not tc.tag.endswith("}tc"):
+                        continue
+                    cell_lines = _xml_lines(tc)
+                    cells.append(_md_escape_cell(" ".join(cell_lines)))
+                if not cells:
+                    continue
+                ncols = max(ncols, len(cells))
+                rows.append(cells)
+            if not rows:
+                continue
+            # 对齐每行列数
+            for r in rows:
+                while len(r) < ncols:
+                    r.append("")
+            md = []
+            md.append("| " + " | ".join(rows[0]) + " |")
+            md.append("|" + "|".join([" --- "] * ncols) + "|")
+            for r in rows[1:]:
+                md.append("| " + " | ".join(r) + " |")
+            out.append("\n".join(md))
+    return "\n\n".join(out)
+
+
+def _xlsx_shared_strings(zf):
+    """xlsx → xl/sharedStrings.xml 的字符串表：返回 [str,...]（<si> 内拼接 <t>，多段空格连）。"""
+    import xml.etree.ElementTree as ET
+    try:
+        data = zf.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return []
+    out = []
+    for si in root:
+        if not si.tag.endswith("}si"):
             continue
         parts = []
-        for node in p.iter():
-            tag = node.tag
-            if tag.endswith("}t"):
-                parts.append(node.text or "")
-            elif tag.endswith("}tab"):
-                parts.append("\t")
-            elif tag.endswith("}br") or tag.endswith("}cr"):
-                parts.append("\n")
-        text = "".join(parts).strip()
-        if text:
-            paragraphs.append(text)
-    return "\n".join(paragraphs)
+        for t in si.iter():
+            if t.tag.endswith("}t"):
+                parts.append(t.text or "")
+        out.append(" ".join(" ".join(str(p) for p in parts).split()))
+    return out
+
+
+def _xlsx_text(zf):
+    """xlsx → xl/worksheets 首个 sheet + xl/sharedStrings.xml，前若干行转 Markdown 表格。
+    表头=第一行；随后数据行；空单元格补 ""。"""
+    import xml.etree.ElementTree as ET
+    sheets = sorted([n for n in zf.namelist()
+                     if re.match(r"^xl/worksheets/sheet\d+\.xml$", n)])
+    if not sheets:
+        return ""
+    shared = _xlsx_shared_strings(zf)
+    root = ET.fromstring(zf.read(sheets[0]))
+    rows = []
+    for row in root.iter():
+        if not row.tag.endswith("}row"):
+            continue
+        cells = []
+        for c in row:
+            if not c.tag.endswith("}c"):
+                continue
+            t_attr = c.get("t")  # "s"=shared string
+            val = None
+            for child in c:
+                tag = child.tag
+                if tag.endswith("}v"):
+                    val = child.text or ""
+                elif tag.endswith("}is"):
+                    # inline string：<is><t>…</t></is>
+                    val = "".join(t.text or "" for t in child.iter()
+                                  if t.tag.endswith("}t"))
+            if val is None:
+                cells.append("")
+                continue
+            if t_attr == "s":
+                try:
+                    idx = int(val)
+                    val = shared[idx] if 0 <= idx < len(shared) else ""
+                except (ValueError, IndexError, TypeError):
+                    val = ""
+            cells.append(_md_escape_cell(val))
+        if cells:
+            rows.append(cells)
+    if not rows:
+        return ""
+    ncols = max(len(r) for r in rows)
+    for r in rows:
+        while len(r) < ncols:
+            r.append("")
+    md = []
+    md.append("| " + " | ".join(rows[0]) + " |")
+    md.append("|" + "|".join([" --- "] * ncols) + "|")
+    for r in rows[1:]:
+        md.append("| " + " | ".join(r) + " |")
+    return "\n".join(md)
 
 
 def _pptx_text(zf):
@@ -2606,23 +2705,30 @@ def _pptx_text(zf):
 
 
 def _read_office_text(path, ext, limit):
-    """t8 零依赖 Office 文本预览。成功返回与 _read_text 同构的响应 dict；
+    """t8/t19 零依赖 Office 文本预览。成功返回与 _read_text 同构的响应 dict；
     非 Office 结构/无可提取文本返回 None，交由 _read_text 原有二进制拦截流程。"""
+    import xml.etree.ElementTree as ET  # noqa: F401  供下方 except ET.ParseError 使用
     name = os.path.basename(path) or path
     total = os.path.getsize(path)
     content = None
     encoding = None
     notice = None
-    if ext in ("docx", "pptx"):
+    if ext in ("docx", "pptx", "xlsx"):
         try:
             with zipfile.ZipFile(path) as zf:
-                content = _docx_text(zf) if ext == "docx" else _pptx_text(zf)
-        except (zipfile.BadZipFile, KeyError, OSError, ValueError, NotImplementedError, RuntimeError):
+                if ext == "docx":
+                    content = _docx_text(zf)
+                elif ext == "xlsx":
+                    content = _xlsx_text(zf)
+                else:
+                    content = _pptx_text(zf)
+        except (zipfile.BadZipFile, KeyError, OSError, ValueError,
+                NotImplementedError, RuntimeError, ET.ParseError):
             return None
         if not content:
             return None
         encoding = "utf-8"
-    else:  # doc / ppt：OLE2 启发式 UTF-16LE
+    else:  # doc / ppt / xls：OLE2 启发式 UTF-16LE
         try:
             with open(path, "rb") as fh:
                 raw = fh.read(min(total, _OLE2_HEURISTIC_MAX))
@@ -2633,7 +2739,7 @@ def _read_office_text(path, ext, limit):
             return None
         encoding = "utf-16le"
         notice = ("提示：.%s 为 OLE2 复合文档，这是按 UTF-16LE 做的启发式文本提取，"
-                  "尽量还原正文，可能与实际排版/嵌入内容存在差异。" % ext)
+                  "尽量还原正文/单元格文本，可能与实际排版/嵌入内容存在差异。" % ext)
     full_len = len(content)
     truncated = full_len > limit
     if truncated:
@@ -3924,6 +4030,200 @@ def _save_shares() -> None:
 
 # 模块加载时恢复上次的分享记录（含跨进程重启的分享链接）
 _load_shares()
+
+
+# ------------------------------------------------------------- t18 流式 multipart 上传
+# cgi.FieldStorage 已弃用（3.13 移除）且对二进制大文件存在解析截断/错位风险。
+# 改用手写流式 multipart 解析：零第三方、3.10-3.13 全兼容，文件体逐块写盘、不断字节。
+# 文件名按 RFC 5987 filename*=UTF-8''… 或原始 UTF-8 宽松解码，不再强制 latin-1 往返。
+_UPLOAD_MAX_BYTES = 4 * 1024 * 1024 * 1024  # t18 防御性单文件上限（4GB，可改）
+
+
+def _upload_filename(headers):
+    """从 part 头析出文件名（RFC 5987 filename* 优先，其次原始 filename）。"""
+    raw = None
+    star = None
+    for ln in headers:
+        ln = ln.strip()
+        if ln.lower().startswith(b"content-disposition:"):
+            disp = ln.split(b":", 1)[1]
+            for token in disp.split(b";"):
+                token = token.strip()
+                if token.lower().startswith(b"filename*="):
+                    star = token[len(b"filename*="):]
+                elif token.lower().startswith(b"filename="):
+                    raw = token[len(b"filename="):]
+    if star is not None:
+        s = star
+        if isinstance(s, bytes):
+            s = s.decode("latin-1", "replace")
+        s = s.strip().strip('"').strip("'")
+        # RFC 5987: charset'lang'percent-encoded
+        if "'" in s:
+            try:
+                _, _, pct = s.split("'", 2)
+                return urllib.parse.unquote(pct)
+            except ValueError:
+                pass
+        # 无引号变体：直接 UTF-8 解引号
+        return urllib.parse.unquote(s) if ("%" in s) else s
+    if raw is not None:
+        if isinstance(raw, bytes):
+            txt = raw.decode("latin-1", "replace").strip().strip('"')
+        else:
+            txt = raw.strip().strip('"')
+        # 浏览器多数直接走私 UTF-8 bytes：把 latin-1 假解码还原为 UTF-8
+        try:
+            return txt.encode("latin-1").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            return txt
+    return None
+
+
+def _iter_multipart_parts(rfile, boundary, chunk=1 << 16):
+    """流式解析 multipart/form-data object，逐 part 迭代。
+    yield (headers(list[bytes]), body_chunk_iter)。body_chunk_iter 迭代原始字节块，
+    不做任何文本解码；本函数不在内存中累积整段 body（除跨块保留的边界前缀尾巴）。
+    boundary 为 Content-Type 中不含 '--' 的边界串。
+    """
+    marker = b"--" + boundary.encode()
+    delim = b"\r\n" + marker
+    buf = b""
+    eof = False
+
+    def fill():
+        nonlocal buf, eof
+        if eof:
+            return False
+        # 用 read1 只读一次底层 recv 即时返回，避免 BufferedReader.read(n) 在
+        # keep-alive 下无 EOF 时阻塞凑满 n 字节（读不足会卡死请求线程）。
+        try:
+            c = rfile.read1(chunk) if hasattr(rfile, "read1") else rfile.read(chunk)
+        except Exception:  # noqa: BLE001
+            c = b""
+        if not c:
+            eof = True
+            return False
+        buf += c
+        return True
+
+    # 跳过 preamble（标准/curl 上传首字节即 --boundary）
+    while True:
+        i = buf.find(marker)
+        if i >= 0:
+            buf = buf[i + len(marker):]
+            break
+        if not fill():
+            return
+    while True:
+        # 当前 buffer 起点应为 marker 之后的串（首段为 \r\n，后续段同）
+        stripped = buf.lstrip(b"\r\n")
+        if stripped[:2] == b"--":
+            return  # 闭合边界 --marker--
+        # 解析头：直到空行 \r\n\r\n
+        while True:
+            i = buf.find(b"\r\n\r\n")
+            if i >= 0:
+                header_bytes = buf[:i]
+                buf = buf[i + 4:]
+                break
+            if not fill():
+                return  # 头不完整，畸形请求
+        headers = [ln for ln in header_bytes.split(b"\r\n") if ln]
+
+        def body_iter():
+            nonlocal buf
+            step = 1 << 20
+            while True:
+                j = buf.find(delim)
+                if j >= 0:
+                    body = buf[:j]
+                    buf = buf[j:]
+                    for k in range(0, len(body), step):
+                        yield body[k:k + step]
+                    return
+                keep = len(delim) - 1
+                if len(buf) > keep:
+                    emit = buf[:-keep]
+                    buf = buf[-keep:]
+                    for k in range(0, len(emit), step):
+                        yield emit[k:k + step]
+                if not fill():
+                    # 流在 delim 之前结束（截断请求）：把余下全部当 body 产出后结束
+                    emit = buf
+                    buf = b""
+                    for k in range(0, len(emit), step):
+                        yield emit[k:k + step]
+                    return
+
+        body = body_iter()
+        try:
+            yield headers, body
+        except GeneratorExit:
+            # 调用方提前中断（如超限/写失败）→ 消费剩余防连接错乱由上层处理
+            pass
+        # 消费 delim：从 buffer 起点剥掉 \r\n--marker
+        if buf.startswith(delim):
+            buf = buf[len(delim):]
+        else:
+            while not buf.startswith(delim) and fill():
+                pass
+            if buf.startswith(delim):
+                buf = buf[len(delim):]
+
+
+def _clean_upload_name(name):
+    """t18/M13 上传文件名清洗：切 ADS 冒号/去首尾空白尾随点 + 拒绝 Windows 保留名。"""
+    name = name.split(":", 1)[0].strip().rstrip(". ")
+    if name.split(".", 1)[0].upper() in _WIN_RESERVED_NAMES:
+        name = ""
+    return name or "file"
+
+
+def _parse_and_save_upload(rfile, content_type, dest_dir):
+    """流式解析上传 multipart，把文件字段逐块写入 dest_dir。
+    返回 (saved, errors)。仅处理含 filename 的文件字段，其余字段忽略。
+    不做任何文本解码，逐字节写盘；单文件超 _UPLOAD_MAX_BYTES 记 error 并跳过该字段。
+    """
+    boundary = None
+    for bit in content_type.split(";"):
+        bit = bit.strip()
+        if bit.lower().startswith("boundary="):
+            boundary = bit[len("boundary="):].strip().strip("\"").strip("'")
+            break
+    if not boundary:
+        raise ValueError("缺少 multipart boundary")
+    saved, errors = [], []
+    for headers, body_chunks in _iter_multipart_parts(rfile, boundary):
+        fname = _upload_filename(headers)
+        if not fname:
+            for _ in body_chunks:
+                pass  # 丢弃非文件字段体
+            continue
+        name = _clean_upload_name(os.path.basename(fname))
+        dest = os.path.join(dest_dir, name)
+        written = 0
+        ok = True
+        try:
+            with open(dest, "wb") as fh:
+                for blk in body_chunks:
+                    written += len(blk)
+                    if written > _UPLOAD_MAX_BYTES:
+                        ok = False
+                        break
+                    fh.write(blk)
+        except OSError as exc:
+            errors.append({"name": name, "error": str(exc)})
+            for _ in body_chunks:
+                pass
+            continue
+        if not ok:
+            errors.append({"name": name, "error": "超过上传大小上限"})
+            for _ in body_chunks:
+                pass
+            continue
+        saved.append(name)
+    return saved, errors
 
 
 def _fix_zip_name(name):
