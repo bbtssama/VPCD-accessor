@@ -1107,6 +1107,15 @@ function pauseModalMedia() {
 }
 document.addEventListener("visibilitychange", () => { if (document.hidden) pauseModalMedia(); });
 window.addEventListener("pagehide", pauseModalMedia);
+// t14：点击「选项」二级菜单外任意处收菜单（全局注册一次，避免每次打开视频累积监听器）。
+// 按钮/面板自身的点击已在 showVideo 闭包内处理，这里只负责"点外面收起"。
+document.addEventListener("click", (ev) => {
+  document.querySelectorAll(".qmenu.open").forEach(m => {
+    if (!m.contains(ev.target) && !(ev.target.closest && ev.target.closest(".qm-btn"))) {
+      m.classList.remove("open");
+    }
+  });
+});
 function mkBtn(label, fn) {
   const b = document.createElement("button");
   b.className = "btn btn-primary";
@@ -1627,34 +1636,69 @@ function showVideo(path, name) {
     else { blobUrls.push(u); }
     return u;
   }
-  // ---- 控制条：画质 / 免证书 / 缓存下载 / 字幕 ----
+  // ---- 控制条：画质胶囊（原画/高清/标清/低清）+ 「选项」二级菜单（免证书/缓存下载/字幕/识别） ----
   const ctrl = document.createElement("div");
   ctrl.className = "d-flex flex-wrap align-items-center video-ctrl mb-2 small";   // P0 #10：间距/对齐由 .video-ctrl CSS 统一控制
+  // 隐藏 select 承载画质逻辑接口（t14 关键约束：value/onchange/= 赋值被转码/MSE/缓存大量引用，接口原样保留）
   const qSel = document.createElement("select");
-  qSel.className = "form-select form-select-sm flex-shrink-0";
+  qSel.className = "form-select form-select-sm d-none";
   [["original", "原画"], ["high", "高清"], ["medium", "标清"], ["low", "低清"]].forEach(item => {
     const o = document.createElement("option");
     o.value = item[0]; o.textContent = item[1];
     qSel.appendChild(o);
   });
   qSel.value = "original";
-  const wrapSel = document.createElement("span");
-  wrapSel.className = "qwrap";   // P0 #10：flex-shrink:0 + white-space:nowrap，杜绝「画」「质」折行竖排
-  wrapSel.appendChild(document.createTextNode("画质"));
-  wrapSel.appendChild(qSel);
+  // 画质胶囊分段按钮：点击 → 设 qSel.value + 派发 change → 走 qSel.onchange（2545 同款：seekMse/buildMse/playNative）
+  const Q_KEYS = ["original", "high", "medium", "low"];
+  const Q_LABELS = ["原画", "高清", "标清", "低清"];
+  const qSegWrap = document.createElement("div");
+  qSegWrap.className = "btn-group btn-group-sm video-qseg";
+  const qSegBtns = Q_KEYS.map((k, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn btn-outline-primary";
+    b.textContent = Q_LABELS[i];
+    b.addEventListener("click", () => {
+      if (qSel.value === k) return;   // 点当前档：不动作，避免重复重建
+      qSel.value = k;
+      syncQSeg();
+      qSel.dispatchEvent(new Event("change"));   // 触发 qSel.onchange 同款切换逻辑
+    });
+    qSegWrap.appendChild(b);
+    return b;
+  });
+  function syncQSeg() {
+    qSegBtns.forEach((b, i) => {
+      const on = qSel.value === Q_KEYS[i];
+      b.classList.toggle("btn-primary", on);
+      b.classList.toggle("btn-outline-primary", !on);
+    });
+  }
+  syncQSeg();   // 初始：原画高亮
+  // 二级菜单：四复选框（免证书 MSE/缓存下载/字幕/识别）收进「选项」折叠面板，
+  // 只移动 DOM 挂载位置，mse/cache/sub/asr 的 onchange 联动逻辑不动（在 showVideo 内声明）
   const mseChk = mkCheck("免证书(MSE)", false);
   const cacheChk = mkCheck("缓存下载", false);
   const subChk = mkCheck("字幕", false);
   const asrChk = mkCheck("识别", false);
-  // P0 #10：复选框收进 .video-chks 组——手机端 2×2 网格、统一左缘、label 行高 44px（CSS 控制）
   const chkBox = document.createElement("div");
-  chkBox.className = "video-chks";
+  chkBox.className = "video-chks";   // 面板内纵向布局由 .qmenu .video-chks CSS 覆盖
   chkBox.appendChild(mseChk.el);
   chkBox.appendChild(cacheChk.el);
   chkBox.appendChild(subChk.el);
   chkBox.appendChild(asrChk.el);
-  ctrl.appendChild(wrapSel);
-  ctrl.appendChild(chkBox);
+  const qMenu = document.createElement("div");
+  qMenu.className = "qmenu";
+  qMenu.appendChild(chkBox);
+  const qMenuBtn = document.createElement("button");
+  qMenuBtn.type = "button";
+  qMenuBtn.className = "btn btn-outline-secondary btn-sm flex-shrink-0 qm-btn";
+  qMenuBtn.innerHTML = icon("chevronDown", 14) + " 选项";
+  qMenuBtn.addEventListener("click", () => { qMenu.classList.toggle("open"); });
+  ctrl.appendChild(qSel);
+  ctrl.appendChild(qSegWrap);
+  ctrl.appendChild(qMenuBtn);
+  ctrl.appendChild(qMenu);
   body.appendChild(ctrl);
   // ---- 视频容器（无 .video-play 覆盖按钮，播放/暂停交给原生 controls） ----
   const wrap = document.createElement("div");
@@ -2497,6 +2541,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
               mseRetry = 0;
               toast("原画流不可用，已切换高清播放");
               qSel.value = "high";
+              syncQSeg();   // t14：胶囊高亮跟随自动降级
               buildMse(v.currentTime || 0).catch(() => { /* 异步内部已兜底 */ });
               return;
             }

@@ -329,6 +329,25 @@
   .video-chks { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 8px; }
   .video-chks .form-check { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; margin: 0; padding-left: 0; }
   .video-chks .form-check-input { accent-color: #2563eb; flex-shrink: 0; }
+  /* t14：控制条重构——画质胶囊分段按钮 + 「选项」二级菜单 */
+  .video-ctrl { position: relative; }   /* qmenu 绝对定位锚点 */
+  .video-qseg { flex-shrink: 0; gap: 2px; flex-wrap: wrap; }
+  .video-qseg .btn { min-height: 32px; padding: .25rem .6rem; font-size: 13px; line-height: 1.4; }
+  .qm-btn { min-height: 32px; display: inline-flex; align-items: center; gap: 4px; }
+  .qmenu { display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 7;
+           min-width: 220px; max-width: calc(100vw - 24px); max-height: 60vh; overflow: auto;
+           background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #111827);
+           border: 1px solid var(--bs-border-color, #d1d5db); border-radius: 10px;
+           box-shadow: 0 10px 30px rgba(17,24,39,.18); padding: 10px 12px; }
+  .qmenu.open { display: block; }
+  .qmenu .video-chks { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
+  .qmenu .form-check { min-height: 36px; display: flex; align-items: center; gap: 8px; margin: 0; padding-left: 0; }
+  .qmenu .form-check-input { accent-color: #2563eb; flex-shrink: 0; }
+  @media (max-width: 575.98px) {
+    /* 手机端：菜单内纵向列表 + 44px 触控行高，max-width/max-height 已保证不超视口 */
+    .qmenu .video-chks { display: flex; flex-direction: column; gap: 2px; }
+    .qmenu .form-check { min-height: 44px; }
+  }
   /* 字幕覆盖层（MSE 模式用自定义 overlay 显示字幕） */
   .video-sub { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; z-index: 4;
                color: #fff; font-size: 15px; line-height: 1.5; text-shadow: 0 1px 3px #000;
