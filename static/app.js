@@ -1648,33 +1648,48 @@ function showVideo(path, name) {
     qSel.appendChild(o);
   });
   qSel.value = "original";
-  // 画质胶囊分段按钮：点击 → 设 qSel.value + 派发 change → 走 qSel.onchange（2545 同款：seekMse/buildMse/playNative）
+  // 画质单下拉按钮（t15）：一个按钮显示当前档 + 下拉单列菜单（绝不四档并排）。
+  // 点击 → 设 qSel.value + 派发 change → 走 qSel.onchange（原逻辑 seekMse/buildMse/playNative 零改动）。
   const Q_KEYS = ["original", "high", "medium", "low"];
   const Q_LABELS = ["原画", "高清", "标清", "低清"];
-  const qSegWrap = document.createElement("div");
-  qSegWrap.className = "btn-group btn-group-sm video-qseg";
-  const qSegBtns = Q_KEYS.map((k, i) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn btn-outline-primary";
-    b.textContent = Q_LABELS[i];
-    b.addEventListener("click", () => {
-      if (qSel.value === k) return;   // 点当前档：不动作，避免重复重建
+  const qWrap = document.createElement("div");
+  qWrap.className = "qsingle";
+  const qBtn = document.createElement("button");
+  qBtn.type = "button";
+  qBtn.className = "btn btn-outline-primary btn-sm qs-btn";
+  qBtn.innerHTML = icon("chevronDown", 14) + " <span class=\"qlbl\">原画</span>";
+  const qList = document.createElement("div");
+  qList.className = "qlist";
+  Q_KEYS.forEach((k, i) => {
+    const it = document.createElement("button");
+    it.type = "button";
+    it.className = "qlist-item" + (qSel.value === k ? " on" : "");
+    it.textContent = Q_LABELS[i];
+    it.addEventListener("click", () => {
+      qList.classList.toggle("open", false);   // 选中即收起
+      if (qSel.value === k) return;
       qSel.value = k;
-      syncQSeg();
+      syncQ();
       qSel.dispatchEvent(new Event("change"));   // 触发 qSel.onchange 同款切换逻辑
     });
-    qSegWrap.appendChild(b);
-    return b;
+    qList.appendChild(it);
   });
-  function syncQSeg() {
-    qSegBtns.forEach((b, i) => {
-      const on = qSel.value === Q_KEYS[i];
-      b.classList.toggle("btn-primary", on);
-      b.classList.toggle("btn-outline-primary", !on);
-    });
+  qBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();   // 避免触发下方"点外部收菜单"的全局监听（qlist 非 .qmenu，需单独处理）
+    qList.classList.toggle("open");
+  });
+  // 点下拉外收起
+  document.addEventListener("click", (ev) => {
+    if (!qWrap.contains(ev.target)) qList.classList.remove("open");
+  });
+  qWrap.appendChild(qBtn);   // 关键：把按钮与下拉列表挂进 .qsingle（此前遗漏导致画质控件为空）
+  qWrap.appendChild(qList);
+  function syncQ() {
+    const idx = Q_KEYS.indexOf(qSel.value);
+    qBtn.querySelector(".qlbl").textContent = Q_LABELS[Math.max(0, idx)];
+    qList.querySelectorAll(".qlist-item").forEach((it, i) => it.classList.toggle("on", i === Math.max(0, idx)));
   }
-  syncQSeg();   // 初始：原画高亮
+  syncQ();   // 初始：原画
   // 二级菜单：四复选框（免证书 MSE/缓存下载/字幕/识别）收进「选项」折叠面板，
   // 只移动 DOM 挂载位置，mse/cache/sub/asr 的 onchange 联动逻辑不动（在 showVideo 内声明）
   const mseChk = mkCheck("免证书(MSE)", false);
@@ -1696,7 +1711,7 @@ function showVideo(path, name) {
   qMenuBtn.innerHTML = icon("chevronDown", 14) + " 选项";
   qMenuBtn.addEventListener("click", () => { qMenu.classList.toggle("open"); });
   ctrl.appendChild(qSel);
-  ctrl.appendChild(qSegWrap);
+  ctrl.appendChild(qWrap);
   ctrl.appendChild(qMenuBtn);
   ctrl.appendChild(qMenu);
   body.appendChild(ctrl);
@@ -2541,7 +2556,7 @@ let previewRatio = null; // 视频宽高比（h/w，loadedmetadata 后可用；�
               mseRetry = 0;
               toast("原画流不可用，已切换高清播放");
               qSel.value = "high";
-              syncQSeg();   // t14：胶囊高亮跟随自动降级
+              syncQ();   // t15：单下拉按钮文字/高亮跟随自动降级
               buildMse(v.currentTime || 0).catch(() => { /* 异步内部已兜底 */ });
               return;
             }

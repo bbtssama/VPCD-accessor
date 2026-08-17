@@ -322,31 +322,42 @@
                    background: rgba(0,0,0,.45); border: 1px solid rgba(255,255,255,.6); border-radius: 6px;
                    overflow: hidden; pointer-events: none; }
   .video-preview img { display: block; height: 90px; opacity: 1; filter: brightness(1.1); transition: opacity .15s ease, filter .15s ease; }   /* 停止后清晰+提亮 1.1；滑动时 JS 置 0.4 无滤镜 */
-  /* 画质/选项控制条（P0 #10）：统一 32px 高、对齐一致、画质标签不折行、复选框组 2×2 网格 */
-  .video-ctrl { align-items: center; row-gap: 8px; column-gap: 16px; }
-  .video-ctrl .qwrap { flex-shrink: 0; white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; }
+  /* 视频控制条：单下拉画质按钮 + 「选项」二级菜单 */
+  .video-ctrl { align-items: center; row-gap: 8px; column-gap: 16px; position: relative; }   /* qmenu/qsingle 绝对定位锚点 */
   .video-ctrl .form-select { min-height: 32px; width: auto; }
-  .video-chks { display: inline-flex; flex-wrap: wrap; align-items: center; column-gap: 16px; row-gap: 8px; }
-  .video-chks .form-check { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; margin: 0; padding-left: 0; }
-  .video-chks .form-check-input { accent-color: #2563eb; flex-shrink: 0; }
-  /* t14：控制条重构——画质胶囊分段按钮 + 「选项」二级菜单 */
-  .video-ctrl { position: relative; }   /* qmenu 绝对定位锚点 */
-  .video-qseg { flex-shrink: 0; gap: 2px; flex-wrap: wrap; }
-  .video-qseg .btn { min-height: 32px; padding: .25rem .6rem; font-size: 13px; line-height: 1.4; }
+  /* 画质单下拉按钮（t15）：一个按钮显示当前档 + 单列菜单，绝不四档并排 */
+  .qsingle { position: relative; flex-shrink: 0; }
+  .qsingle .qs-btn { min-height: 32px; display: inline-flex; align-items: center; gap: 4px; width: 96px; justify-content: space-between; }
+  .qlist { display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 9;
+           min-width: 120px; background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #111827);
+           border: 1px solid var(--bs-border-color, #d1d5db); border-radius: 8px;
+           box-shadow: 0 8px 24px rgba(17,24,39,.18); padding: 4px; }
+  .qlist.open { display: block; }
+  .qlist .qlist-item { display: block; width: 100%; text-align: left; padding: 7px 10px;
+                       border: none; background: none; color: inherit; font-size: 13px;
+                       border-radius: 6px; cursor: pointer; line-height: 1.4; }
+  .qlist .qlist-item:hover { background: var(--bs-secondary-bg, #f3f4f6); }
+  .qlist .qlist-item.on { color: #fff; background: #2563eb; }
+  /* 「选项」二级菜单（t15）：内复选框渲染修复——22×22 桌面 / 24 移动，垂直居中对齐，整行可点，不挡进度条 */
   .qm-btn { min-height: 32px; display: inline-flex; align-items: center; gap: 4px; }
-  .qmenu { display: none; position: absolute; top: calc(100% + 6px); right: 0; z-index: 7;
-           min-width: 220px; max-width: calc(100vw - 24px); max-height: 60vh; overflow: auto;
-           background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #111827);
+  .qmenu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 8;
+           display: none; min-width: 220px; max-width: calc(100vw - 24px); max-height: 56vh;
+           overflow-y: auto; background: var(--bs-body-bg, #fff); color: var(--bs-body-color, #111827);
            border: 1px solid var(--bs-border-color, #d1d5db); border-radius: 10px;
            box-shadow: 0 10px 30px rgba(17,24,39,.18); padding: 10px 12px; }
   .qmenu.open { display: block; }
-  .qmenu .video-chks { display: flex; flex-direction: column; align-items: stretch; gap: 2px; }
-  .qmenu .form-check { min-height: 36px; display: flex; align-items: center; gap: 8px; margin: 0; padding-left: 0; }
-  .qmenu .form-check-input { accent-color: #2563eb; flex-shrink: 0; }
+  .qmenu .video-chks { display: flex; flex-direction: column; gap: 2px; }
+  .qmenu .form-check { display: flex; align-items: center; gap: 10px; min-height: 36px;
+                       margin: 0; padding: 0; cursor: pointer; }
+  .qmenu .form-check > * { vertical-align: middle; }
+  .qmenu .form-check-input { width: 22px; height: 22px; margin: 0; flex-shrink: 0;
+                             accent-color: #2563eb; cursor: pointer; }
+  .qmenu .form-check-label { display: inline-flex; align-items: center; min-height: 22px; line-height: 1.4; cursor: pointer; }
   @media (max-width: 575.98px) {
-    /* 手机端：菜单内纵向列表 + 44px 触控行高，max-width/max-height 已保证不超视口 */
-    .qmenu .video-chks { display: flex; flex-direction: column; gap: 2px; }
+    /* 手机端：24px 勾选框 + 44px 触控行高，max-height 已保证不超视口 */
     .qmenu .form-check { min-height: 44px; }
+    .qmenu .form-check-input { width: 24px; height: 24px; }
+    .qmenu { max-height: 50vh; }
   }
   /* 字幕覆盖层（MSE 模式用自定义 overlay 显示字幕） */
   .video-sub { position: absolute; left: 0; right: 0; bottom: 8%; text-align: center; z-index: 4;
